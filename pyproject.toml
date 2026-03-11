@@ -1,0 +1,46 @@
+[project]
+name = "rl-mimicgen"
+version = "0.1.0"
+description = "RL + Mimicgen (Blackwell Env)"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+  "mujoco==2.3.2",
+  "torch==2.7.1",
+  "torchvision==0.22.1",
+  "torchaudio==2.7.1",
+  "mimicgen",
+  "robosuite",
+  "robomimic",
+]
+
+[dependency-groups]
+tools = [
+  "gitman",
+  "just",
+  "ipython",
+  "pytest",
+  "ruff"
+]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+# package this subfolder as rl_mimicgen
+[tool.setuptools.packages.find]
+include = ["rl_mimicgen*"]
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
+torchaudio = { index = "pytorch-cu128" }
+
+# Local editable checkouts managed by gitman.
+mimicgen = { path = "./mimicgen", editable = true }
+robosuite = { path = "./robosuite", editable = true }
+robomimic = { path = "./robomimic", editable = true }
