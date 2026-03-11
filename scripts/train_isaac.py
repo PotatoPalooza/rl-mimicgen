@@ -40,11 +40,11 @@ import gymnasium as gym  # noqa: E402
 import isaaclab_tasks  # noqa: F401 E402
 import isaaclab_tasks.manager_based.locomanipulation.pick_place  # noqa: F401 E402
 import isaaclab_tasks.manager_based.manipulation.pick_place  # noqa: F401 E402
-
-import robomimic.tasks.lift  # noqa: F401 E402
 import robomimic.utils.torch_utils as TorchUtils  # noqa: E402
 from robomimic.config import config_factory  # noqa: E402
 from robomimic.scripts.train import train  # noqa: E402
+
+import rl_mimicgen.tasks  # noqa: F401 E402
 
 
 def main(args: argparse.Namespace):

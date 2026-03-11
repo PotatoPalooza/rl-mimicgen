@@ -79,7 +79,7 @@ from isaaclab_tasks.utils import get_checkpoint_path  # noqa: E402
 from isaaclab_tasks.utils.hydra import hydra_task_config  # noqa: E402
 from rsl_rl.runners import DistillationRunner, OnPolicyRunner  # noqa: E402
 
-import robomimic.tasks  # noqa: F401 E402
+import rl_mimicgen.tasks  # noqa: F401 E402
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
