@@ -254,11 +254,6 @@ class OnlineRLTrainer:
         policy_path = self.output_dir / f"policy_best_update_{update:04d}_success_{success_str}.pth"
         trainer_path = self.output_dir / f"trainer_best_update_{update:04d}_success_{success_str}.pt"
 
-        if self.best_policy_path is not None and self.best_policy_path.exists():
-            self.best_policy_path.unlink()
-        if self.best_trainer_path is not None and self.best_trainer_path.exists():
-            self.best_trainer_path.unlink()
-
         torch.save(self.policy.export_robomimic_checkpoint(), policy_path)
         trainer_state = {
             "actor_optimizer": self.actor_optimizer.state_dict(),
@@ -320,13 +315,22 @@ class OnlineRLTrainer:
             torch.nn.utils.clip_grad_norm_(self.policy.value_net.parameters(), self.config.optimizer.max_grad_norm)
             self.value_optimizer.step()
 
-            approx_kl = float((old_log_probs - new_log_probs).mean().detach().cpu())
+            with torch.no_grad():
+                post_update_log_probs, _ = self.policy.evaluate_actions_full_batch(
+                    observations=rollout.observations,
+                    goals=rollout.goals,
+                    actions=actions,
+                    episode_starts=episode_starts,
+                )
+            approx_kl = float((old_log_probs - post_update_log_probs).mean().detach().cpu())
+            pre_update_kl = float((old_log_probs - new_log_probs).mean().detach().cpu())
             metrics = {
                 "policy_loss": float(policy_loss.detach().cpu()),
                 "value_loss": float(value_loss.detach().cpu()),
                 "entropy": float(entropy_bonus.detach().cpu()),
                 "demo_loss": float(demo_loss.detach().cpu()),
                 "demo_weight": float(self.current_demo_coef),
+                "pre_update_kl": pre_update_kl,
                 "approx_kl": approx_kl,
             }
             if approx_kl > self.config.ppo.target_kl:
