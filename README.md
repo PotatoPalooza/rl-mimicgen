@@ -1,6 +1,6 @@
 # rl-mimicgen
 
-Local setup and a minimal DAPG training flow for MimicGen and robomimic experiments.
+RL + mimicgen
 
 ## Requirements
 
