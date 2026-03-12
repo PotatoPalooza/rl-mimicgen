@@ -261,7 +261,22 @@ class Runner:
                     obs_modality=obs_modality,
                 )
                 config_paths.append(config_path)
+        self.rewrite_training_output_dirs(config_paths)
         return config_paths
+
+    def rewrite_training_output_dirs(self, config_paths: list[str]) -> None:
+        for config_path in config_paths:
+            path = Path(config_path)
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            experiment_name = payload.get("experiment", {}).get("name")
+            if not isinstance(experiment_name, str) or not experiment_name:
+                raise ValueError(f"Generated config missing experiment.name: {config_path}")
+            train_cfg = payload.get("train")
+            if not isinstance(train_cfg, dict):
+                raise ValueError(f"Generated config missing train settings: {config_path}")
+            train_cfg["output_dir"] = str(self.cfg.core_train_output_dir)
+            path.write_text(json.dumps(payload, indent=4) + "\n", encoding="utf-8")
+            self.logger.info("Flattened training output dir for %s -> %s", experiment_name, self.cfg.core_train_output_dir)
 
     def filter_training_configs(self, config_paths: list[str]) -> list[str]:
         if self.cfg.variants is None and self.cfg.modalities is None:
