@@ -174,8 +174,8 @@ class OnlineRLTrainer:
             self.current_demo_coef *= self.config.demo.decay
 
         self.save_checkpoint(tag="latest")
-        self.env.close()
-        self.eval_env.close()
+        self._close_env(self.env)
+        self._close_env(self.eval_env)
 
     def evaluate(self, update: int) -> dict[str, float]:
         video_writer = None
@@ -399,6 +399,12 @@ class OnlineRLTrainer:
     @staticmethod
     def _emit(message: str) -> None:
         print(message, flush=True)
+
+    @staticmethod
+    def _close_env(env) -> None:
+        close_fn = getattr(env, "close", None)
+        if callable(close_fn):
+            close_fn()
 
     @staticmethod
     def _resolve_device(device: str) -> torch.device:
