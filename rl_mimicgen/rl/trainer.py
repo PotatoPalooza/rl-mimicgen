@@ -9,14 +9,14 @@ import imageio
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
-from rsl_rl.storage import RolloutStorage
 
 from robomimic.utils.train_utils import dataset_factory
 
 from rl_mimicgen.rl.config import OnlineRLConfig
 from rl_mimicgen.rl.policy import OnlinePolicyAdapter, load_policy_bundle
+from rl_mimicgen.rl.ppo import DemoAugmentedPPO
 from rl_mimicgen.rl.robomimic_env import ParallelRobomimicVectorEnv, SerialRobomimicVectorEnv, make_robosuite_env_from_checkpoint
-from rl_mimicgen.rl.rsl_rl import DemoAugmentedPPO, RslRlRobomimicActor, RslRlValueCritic, obs_to_tensordict
+from rl_mimicgen.rl.storage import RolloutStorage
 
 
 class OnlineRLTrainer:
@@ -36,8 +36,6 @@ class OnlineRLTrainer:
             init_log_std=config.ppo.init_log_std,
             min_log_std=config.ppo.min_log_std,
         )
-        self.actor = RslRlRobomimicActor(self.policy)
-        self.critic = RslRlValueCritic(self.policy)
 
         self.env = self._build_vector_env()
         self.eval_env = self._build_eval_env(
@@ -51,36 +49,32 @@ class OnlineRLTrainer:
             self.demo_loader = self._build_demo_loader()
             self.demo_iter = iter(self.demo_loader)
 
-        reset_obs, _ = self.env.reset(seed=self.config.seed)
-        storage = RolloutStorage(
-            "rl",
-            self.config.num_envs,
-            self.config.rollout_steps,
-            obs_to_tensordict(reset_obs, self.device),
-            [int(np.prod(self.env.single_action_space.shape))],
-            device=str(self.device),
+        self.storage = RolloutStorage(
+            rollout_steps=self.config.rollout_steps,
+            num_envs=self.config.num_envs,
+            obs_shapes=self.policy.obs_shapes,
+            goal_shapes=self.policy.goal_shapes,
+            action_dim=int(np.prod(self.env.single_action_space.shape)),
+            device=self.device,
         )
         self.algorithm = DemoAugmentedPPO(
-            actor=self.actor,
-            critic=self.critic,
-            storage=storage,
+            policy=self.policy,
             demo_batch_iterator=self._demo_batch_generator() if self.config.demo.enabled else None,
             demo_loss_fn=self.policy.demo_loss if self.config.demo.enabled else None,
             demo_coef=self.config.demo.coef if self.config.demo.enabled else 0.0,
             actor_learning_rate=self.config.optimizer.actor_lr,
             critic_learning_rate=self.config.optimizer.value_lr,
+            weight_decay=self.config.optimizer.weight_decay,
             critic_warmup_updates=self.config.ppo.critic_warmup_updates,
             actor_freeze_env_steps=self.config.ppo.actor_freeze_env_steps,
             num_learning_epochs=self.config.ppo.update_epochs,
             num_mini_batches=self.config.ppo.num_minibatches,
             clip_param=self.config.ppo.clip_ratio,
-            gamma=self.config.ppo.gamma,
-            lam=self.config.ppo.gae_lambda,
             value_loss_coef=self.config.ppo.value_coef,
             entropy_coef=self.config.ppo.entropy_coef,
-            learning_rate=self.config.optimizer.actor_lr,
+            target_kl=self.config.ppo.target_kl,
             max_grad_norm=self.config.optimizer.max_grad_norm,
-            device=str(self.device),
+            device=self.device,
         )
 
         self.best_success = float("-inf")
@@ -93,11 +87,12 @@ class OnlineRLTrainer:
 
     def train(self) -> None:
         obs, _ = self.env.reset(seed=self.config.seed)
-        obs_td = obs_to_tensordict(obs, self.device)
+        goal = self._current_goal(self.env)
         running_returns = np.zeros(self.config.num_envs, dtype=np.float32)
         running_lengths = np.zeros(self.config.num_envs, dtype=np.float32)
         episode_horizon = self._env_horizon()
         total_env_steps = 0
+        episode_starts = np.ones(self.config.num_envs, dtype=bool)
 
         for update in range(self.config.total_updates):
             completed_returns = []
@@ -106,20 +101,28 @@ class OnlineRLTrainer:
 
             self.algorithm.train_mode()
             self.algorithm.demo_coef = self.current_demo_coef
+            self.storage.reset()
+            self.storage.set_initial_rnn_state(self.policy.clone_rollout_state())
 
             for _ in range(self.config.rollout_steps):
-                actions = self.algorithm.act(obs_td)
-                next_obs, rewards, terminated, truncated, infos = self.env.step(actions.detach().cpu().numpy())
+                actions, log_probs, values = self.policy.act(
+                    obs=obs,
+                    goal=goal,
+                    episode_starts=episode_starts,
+                    clip_actions=self.config.ppo.clip_actions,
+                )
+                next_obs, rewards, terminated, truncated, infos = self.env.step(actions)
                 done = terminated | truncated
 
-                next_obs_td = obs_to_tensordict(next_obs, self.device)
-                self.algorithm.process_env_step(
-                    next_obs_td,
-                    torch.as_tensor(rewards, dtype=torch.float32, device=self.device),
-                    torch.as_tensor(done, dtype=torch.bool, device=self.device),
-                    {
-                        "time_outs": torch.as_tensor(truncated, dtype=torch.float32, device=self.device),
-                    },
+                self.storage.add(
+                    obs=obs,
+                    actions=actions,
+                    goals=goal,
+                    log_probs=log_probs,
+                    rewards=rewards,
+                    dones=done.astype(np.float32),
+                    episode_starts=episode_starts.astype(np.float32),
+                    values=values,
                 )
 
                 running_returns += rewards
@@ -136,19 +139,28 @@ class OnlineRLTrainer:
                     running_lengths[idx] = 0.0
 
                 obs = next_obs
-                obs_td = next_obs_td
+                goal = self._current_goal(self.env)
+                episode_starts = done
 
             total_env_steps += self.config.rollout_steps * self.config.num_envs
             self.algorithm.set_total_env_steps(total_env_steps)
-            self.algorithm.compute_returns(obs_td)
+            last_values = self.policy.predict_value(obs=obs, goal=goal)
+            self.storage.compute_returns_and_advantages(
+                last_value=last_values,
+                gamma=self.config.ppo.gamma,
+                gae_lambda=self.config.ppo.gae_lambda,
+            )
 
-            update_metrics = self.algorithm.update()
+            update_metrics = self.algorithm.update(self.storage.as_batch())
             train_metrics = {
                 "policy_loss": float(update_metrics["surrogate"]),
                 "value_loss": float(update_metrics["value"]),
                 "entropy": float(update_metrics["entropy"]),
                 "demo_loss": float(update_metrics["demo"]),
                 "demo_weight": float(self.current_demo_coef),
+                "approx_kl": float(update_metrics["approx_kl"]),
+                "ppo_early_stop": float(update_metrics["early_stop"]),
+                "effective_num_minibatches": float(update_metrics["effective_num_minibatches"]),
             }
             train_metrics["update"] = update
             train_metrics["episodes_completed"] = float(len(completed_returns))
@@ -221,7 +233,12 @@ class OnlineRLTrainer:
             episode_starts = np.ones(1, dtype=bool)
 
             for step_idx in range(horizon):
-                action = self.policy.act_deterministic(obs={key: value[None, ...] for key, value in obs.items()}, goal=None, episode_starts=episode_starts)[0]
+                goal = self._current_goal(self.eval_env)
+                action = self.policy.act_deterministic(
+                    obs={key: value[None, ...] for key, value in obs.items()},
+                    goal=None if goal is None else {key: value[None, ...] for key, value in goal.items()},
+                    episode_starts=episode_starts,
+                )[0]
                 obs, reward, done, _ = self.eval_env.step(action)
                 total_reward += reward
                 success = success or bool(self.eval_env.is_success()["task"])
@@ -280,7 +297,8 @@ class OnlineRLTrainer:
             self.policy.reset_rollout_state()
 
             while not np.all(completed_mask[active_mask]):
-                actions = self.policy.act_deterministic(obs=obs, goal=None, episode_starts=episode_starts)
+                goal = self._current_goal(self.eval_env)
+                actions = self.policy.act_deterministic(obs=obs, goal=goal, episode_starts=episode_starts)
                 next_obs, rewards, terminated, truncated, infos = self.eval_env.step(actions)
                 done = terminated | truncated
 
@@ -385,7 +403,7 @@ class OnlineRLTrainer:
             render=self.config.robosuite.render_train,
             render_offscreen=False,
             reward_shaping_override=self.config.robosuite.reward_shaping,
-            horizon_override=self.config.robosuite.horizon,
+            horizon_override=self._env_horizon(),
         )
         env_fns = [factory for _ in range(self.config.num_envs)]
         if self.config.robosuite.parallel_envs and self.config.num_envs > 1:
@@ -399,7 +417,7 @@ class OnlineRLTrainer:
             render=render,
             render_offscreen=render_offscreen,
             reward_shaping_override=self.config.robosuite.reward_shaping,
-            horizon_override=self.config.robosuite.horizon,
+            horizon_override=self._env_horizon(),
         )
         if render or render_offscreen or self.config.evaluation.num_envs <= 1:
             return factory()
@@ -413,6 +431,13 @@ class OnlineRLTrainer:
         if self.config.robosuite.horizon is not None:
             return self.config.robosuite.horizon
         return int(self.bundle.config.experiment.rollout.horizon)
+
+    @staticmethod
+    def _current_goal(env) -> dict[str, np.ndarray] | None:
+        get_goal = getattr(env, "get_goal", None)
+        if not callable(get_goal):
+            return None
+        return get_goal()
 
     def _log_metrics(self, metrics: dict[str, float]) -> None:
         with open(self.metrics_path, "a", encoding="utf-8") as f:

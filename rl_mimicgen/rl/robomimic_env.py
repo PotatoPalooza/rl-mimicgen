@@ -90,6 +90,19 @@ def _stack_obs(obs_list: list[dict[str, np.ndarray]]) -> dict[str, np.ndarray]:
     return {key: np.stack([obs[key] for obs in obs_list], axis=0) for key in obs_list[0]}
 
 
+def _get_env_goal(env: Any) -> dict[str, np.ndarray] | None:
+    get_goal = getattr(env, "get_goal", None)
+    if not callable(get_goal):
+        return None
+    try:
+        goal = get_goal()
+    except (AttributeError, NotImplementedError):
+        return None
+    if goal is None:
+        return None
+    return {key: np.asarray(value) for key, value in goal.items()}
+
+
 class SerialRobomimicVectorEnv:
     def __init__(self, env_fns: list[Callable[[], Any]]) -> None:
         self.envs = [fn() for fn in env_fns]
@@ -111,9 +124,11 @@ class SerialRobomimicVectorEnv:
         self.episode_length_buf = torch.zeros(self.num_envs, dtype=torch.long)
 
     def reset(self, seed: int | None = None) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
-        if seed is not None:
-            np.random.seed(seed)
-        obs_list = [env.reset() for env in self.envs]
+        obs_list = []
+        for idx, env in enumerate(self.envs):
+            if seed is not None:
+                np.random.seed(seed + idx)
+            obs_list.append(env.reset())
         self._timesteps[:] = 0
         self.episode_length_buf.zero_()
         return _stack_obs(obs_list), {}
@@ -159,6 +174,12 @@ class SerialRobomimicVectorEnv:
         tensor_obs = {key: torch.as_tensor(value, dtype=torch.float32) for key, value in obs.items()}
         return TensorDict(tensor_obs, batch_size=[self.num_envs])
 
+    def get_goal(self) -> dict[str, np.ndarray] | None:
+        goals = [_get_env_goal(env) for env in self.envs]
+        if any(goal is None for goal in goals):
+            return None
+        return _stack_obs(goals)
+
 
 def _worker(remote, env_fn_bytes: bytes) -> None:
     _ensure_local_repo_paths()
@@ -200,6 +221,8 @@ def _worker(remote, env_fn_bytes: bytes) -> None:
                     obs = env.reset()
                     timestep = 0
                 remote.send((obs, float(reward), terminated, truncated, final_info))
+            elif cmd == "get_goal":
+                remote.send(_get_env_goal(env))
             elif cmd == "close":
                 close_fn = getattr(env, "close", None)
                 if callable(close_fn):
@@ -283,6 +306,14 @@ class ParallelRobomimicVectorEnv:
         obs, _ = self.reset()
         tensor_obs = {key: torch.as_tensor(value, dtype=torch.float32) for key, value in obs.items()}
         return TensorDict(tensor_obs, batch_size=[self.num_envs])
+
+    def get_goal(self) -> dict[str, np.ndarray] | None:
+        for remote in self.remotes:
+            remote.send(("get_goal", None))
+        goals = [remote.recv() for remote in self.remotes]
+        if any(goal is None for goal in goals):
+            return None
+        return _stack_obs(goals)
 
 
 def make_robosuite_env_from_checkpoint(

@@ -224,6 +224,7 @@ class OnlinePolicyAdapter(nn.Module):
     def evaluate_actions_rollout(
         self,
         observations: dict[str, torch.Tensor],
+        goals: dict[str, torch.Tensor] | None,
         actions: torch.Tensor,
         episode_starts: torch.Tensor,
         initial_rnn_state: Any = None,
@@ -239,19 +240,22 @@ class OnlinePolicyAdapter(nn.Module):
                 reset_mask = episode_starts[step].to(dtype=torch.bool)
                 rnn_state = self._reset_state_indices(rnn_state, reset_mask)
                 obs_batch = {key: value[step] for key, value in observations.items()}
-                dist, rnn_state = self._dist_from_step(obs_batch, None, rnn_state)
+                goal_batch = None if goals is None else {key: value[step] for key, value in goals.items()}
+                dist, rnn_state = self._dist_from_step(obs_batch, goal_batch, rnn_state)
                 log_probs.append(dist.log_prob(actions[step]))
                 entropies.append(_safe_entropy(dist))
             return torch.stack(log_probs, dim=0).reshape(-1), torch.stack(entropies, dim=0).reshape(-1)
 
         flat_obs = {key: value.reshape(-1, *value.shape[2:]) for key, value in observations.items()}
-        dist, _ = self._dist_from_step(flat_obs, None)
+        flat_goals = None if goals is None else {key: value.reshape(-1, *value.shape[2:]) for key, value in goals.items()}
+        dist, _ = self._dist_from_step(flat_obs, flat_goals)
         flat_actions = actions.reshape(-1, actions.shape[-1])
         return dist.log_prob(flat_actions), _safe_entropy(dist)
 
-    def value(self, observations: dict[str, torch.Tensor]) -> torch.Tensor:
+    def value(self, observations: dict[str, torch.Tensor], goals: dict[str, torch.Tensor] | None = None) -> torch.Tensor:
         flat_obs = {key: value.reshape(-1, *value.shape[2:]) for key, value in observations.items()}
-        return self.value_net(flat_obs, goal_dict=None).squeeze(-1)
+        flat_goals = None if goals is None else {key: value.reshape(-1, *value.shape[2:]) for key, value in goals.items()}
+        return self.value_net(flat_obs, goal_dict=flat_goals).squeeze(-1)
 
     def predict_value(self, obs: dict[str, np.ndarray], goal: dict[str, np.ndarray] | None) -> np.ndarray:
         with torch.no_grad():
