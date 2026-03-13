@@ -138,7 +138,6 @@ celerybeat.pid
 .env
 .envrc
 .venv
-env/
 venv/
 ENV/
 env.bak/
@@ -210,9 +209,6 @@ __marimo__/
 cache
 runs
 logs
-robomimic
-robosuite
-robosuite-task-zoo
-mimicgen
+resources/
 
 uv.lock
