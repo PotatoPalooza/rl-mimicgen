@@ -1,0 +1,13 @@
+{
+  "checkpoint_path": "/home/nelly/projects/mimicgen/reproduction_runs/paper_bc_public_parallel/coffee/core_training_results/bc_rnn_low_dim_ds_coffee_D1_seed_101/20260309080112/models/model_epoch_450_Coffee_D1_success_0.9.pth",
+  "output_dir": "logs/online_rl_stable_v3",
+  "num_envs": 16,
+  "rollout_steps": 256,
+  "total_updates": 100,
+  "evaluation": {
+    "enabled": true,
+    "episodes": 20,
+    "num_envs": 16,
+    "every_n_updates": 1
+  }
+}
