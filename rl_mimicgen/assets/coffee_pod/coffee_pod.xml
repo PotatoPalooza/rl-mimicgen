@@ -1,0 +1,34 @@
+<?xml version='1.0' encoding='utf-8'?>
+<mujoco model="base">
+	<compiler angle="radian" inertiagrouprange="0 0" autolimits="true" />
+	<option impratio="20" cone="elliptic" density="1.2" viscosity="0.00002" timestep="0.002" />
+	<size nconmax="5000" njmax="5000" />
+	<asset>
+		<texture builtin="gradient" height="256" rgb1=".9 .9 1." rgb2=".2 .3 .4" type="skybox" width="256" />
+		<texture file="textures/light-gray-floor-tile.png" type="2d" name="texplane" />
+		<material name="floorplane" reflectance="0.01" shininess="0.0" specular="0.0" texrepeat="2 2" texture="texplane" texuniform="true" />
+		<texture file="textures/light-gray-plaster.png" type="2d" name="tex-light-gray-plaster" />
+		<material name="walls_mat" reflectance="0.0" shininess="0.1" specular="0.1" texrepeat="3 3" texture="tex-light-gray-plaster" texuniform="true" />
+		<mesh file="meshes/coffee_pod.stl" name="coffee_pod_mesh" scale="0.018 0.018 0.018" />
+		<texture file="textures/ceramic.png" name="coffee_pod_tex-ceramic" />
+		<material name="coffee_pod_ceramic" reflectance="0.5" texrepeat="1 1" texture="coffee_pod_tex-ceramic" texuniform="true" />
+	</asset>
+	<visual>
+		<map znear="0.001" />
+	</visual>
+	<actuator>
+  </actuator>
+	<worldbody>
+		<body name="coffee_pod_main">
+			<geom pos="0 0 0" mesh="coffee_pod_mesh" type="mesh" solimp="0.998 0.998 0.001" solref="0.001 1" density="100" friction="1 1 1" group="0" condim="4" rgba="0.5 0 0 1" name="coffee_pod_g0" />
+			<geom pos="0 0 0" mesh="coffee_pod_mesh" type="mesh" solimp="0.998 0.998 0.001" solref="0.001 1" density="100" friction="1 1 1" group="1" condim="4" material="coffee_pod_ceramic" rgba="0.839 0.839 0.839 1" name="coffee_pod_g0_visual" conaffinity="0" contype="0" mass="1e-8" />
+			<joint type="free" name="coffee_pod_joint0" />
+			<site pos="0 0 0" size="0.002 0.002 0.002" rgba="1 0 0 0" type="sphere" group="0" name="coffee_pod_default_site" />
+		</body>
+	</worldbody>
+	<equality>
+  </equality>
+	<sensor />
+	<tendon />
+	<contact />
+</mujoco>

@@ -51,6 +51,10 @@ TASK_VARIANTS = {
     "kitchen": ["D0", "D1"],
 }
 MODALITIES = ("low_dim", "image")
+ISAAC_LAB_TASKS = {
+    "lift": "Franka-Lift-v0",
+    "coffee": "Franka-Coffee-v0",
+}
 
 
 def load_mimicgen_stack() -> dict[str, object]:
@@ -88,6 +92,7 @@ def add_bool_arg(parser: argparse.ArgumentParser, name: str, default: bool, help
 class Config:
     task: str
     variants: Optional[list[str]]
+    sim: str
     modalities: Optional[list[str]]
     workspace_dir: Path
     run_root: Path
@@ -216,7 +221,9 @@ class Runner:
             self.stage("download_released_core_datasets", self.download_released_core_datasets)
         self.stage("generate_core_training_commands", self.generate_core_training_commands)
         if self.cfg.run_training:
-            self.stage("verify_core_training_datasets", lambda: self.verify_training_inputs(self.cfg.core_train_commands))
+            self.stage(
+                "verify_core_training_datasets", lambda: self.verify_training_inputs(self.cfg.core_train_commands)
+            )
             self.stage("verify_training_environment", self.verify_training_environment)
             self.stage("run_core_training", lambda: self.run_command_file("core_train", self.cfg.core_train_commands))
 
@@ -240,8 +247,25 @@ class Runner:
     def generate_core_training_commands(self) -> None:
         config_paths = self.generate_released_dataset_training_configs()
         config_paths = self.filter_training_configs(config_paths)
+        if self.cfg.task not in ISAAC_LAB_TASKS:
+            raise ValueError(
+                f"{self.cfg.task} does not have a valid Isaac Lab environment config. Valid keys are: "
+                f"{list(ISAAC_LAB_TASKS.keys())}"
+            )
         commands = [
-            shlex.join([sys.executable, "-m", "rl_mimicgen.mimicgen.train_robomimic", "--config", config_path])
+            shlex.join(
+                [
+                    sys.executable,
+                    "-m",
+                    "rl_mimicgen.mimicgen.train_robomimic",
+                    "--config",
+                    config_path,
+                    "--sim",
+                    self.cfg.sim,
+                    "--task",
+                    ISAAC_LAB_TASKS[self.cfg.task],
+                ]
+            )
             for config_path in config_paths
         ]
         self.write_command_file(self.cfg.core_train_commands, commands, "core training")
@@ -276,7 +300,9 @@ class Runner:
                 raise ValueError(f"Generated config missing train settings: {config_path}")
             train_cfg["output_dir"] = str(self.cfg.core_train_output_dir)
             path.write_text(json.dumps(payload, indent=4) + "\n", encoding="utf-8")
-            self.logger.info("Flattened training output dir for %s -> %s", experiment_name, self.cfg.core_train_output_dir)
+            self.logger.info(
+                "Flattened training output dir for %s -> %s", experiment_name, self.cfg.core_train_output_dir
+            )
 
     def filter_training_configs(self, config_paths: list[str]) -> list[str]:
         if self.cfg.variants is None and self.cfg.modalities is None:
@@ -351,8 +377,7 @@ class Runner:
             if len(missing) > 3:
                 preview += f", ... ({len(missing)} missing total)"
             raise FileNotFoundError(
-                "Training requested but required datasets are missing. "
-                f"Expected dataset files such as: {preview}."
+                f"Training requested but required datasets are missing. Expected dataset files such as: {preview}."
             )
 
     def write_command_file(self, path: Path, lines: list[str], label: str) -> None:
@@ -393,6 +418,13 @@ def parse_args(argv: Optional[list[str]] = None) -> Config:
         help="Limit training to one or more dataset variants for this task, such as D0, D1, D2, O1, or O2.",
     )
     parser.add_argument(
+        "--sim",
+        type=str,
+        choices=["mujoco", "isaac"],
+        default="mujoco",
+        help="Specify the simulator to use for training. Defaults to mujoco.",
+    )
+    parser.add_argument(
         "--modality",
         dest="modalities",
         action="append",
@@ -424,6 +456,7 @@ def parse_args(argv: Optional[list[str]] = None) -> Config:
     return Config(
         task=args.task,
         variants=variants,
+        sim=args.sim,
         modalities=modalities,
         workspace_dir=workspace_dir,
         run_root=run_root,

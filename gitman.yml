@@ -1,21 +1,21 @@
 location: .
 
 sources:
-  - name: robosuite
+  - name: resources/robosuite
     repo: https://github.com/ARISE-Initiative/robosuite
     rev: b9d8d3de5e3dfd1724f4a0e6555246c460407daa
     # (uncomment if too slow)
     # params: --depth=1 --filter=blob:none 
 
-  - name: robosuite-task-zoo
+  - name: resources/robosuite-task-zoo
     repo: https://github.com/ARISE-Initiative/robosuite-task-zoo.git
     rev: 74eab7f88214c21ca1ae8617c2b2f8d19718a9ed
 
-  - name: robomimic
+  - name: resources/robomimic
     repo: https://github.com/Creampelt/robomimic
-    rev: d0b37cf214bd24fb590d182edb6384333f67b661
+    rev: feat/isaac
 
-  - name: mimicgen
+  - name: resources/mimicgen
     repo: https://github.com/NVlabs/mimicgen
     rev: main
 
