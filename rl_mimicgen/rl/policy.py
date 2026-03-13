@@ -309,7 +309,7 @@ def _clone_rnn_state(state: Any) -> Any:
     if isinstance(state, tuple):
         return tuple(_clone_rnn_state(value) for value in state)
     if torch.is_tensor(state):
-        return state.clone()
+        return state.detach().clone()
     return deepcopy(state)
 
 

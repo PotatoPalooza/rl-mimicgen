@@ -263,7 +263,7 @@ class DemoAugmentedPPO(PPO):
         episode_starts[1:] = self.storage.dones[:-1, :, 0].bool()
         initial_rnn_state = None
         if self.actor.is_recurrent and self.storage.saved_hidden_state_a is not None:
-            initial_rnn_state = [saved_state[0].clone() for saved_state in self.storage.saved_hidden_state_a]
+            initial_rnn_state = [saved_state[0].detach().clone() for saved_state in self.storage.saved_hidden_state_a]
             if len(initial_rnn_state) == 1:
                 initial_rnn_state = initial_rnn_state[0]
             else:
