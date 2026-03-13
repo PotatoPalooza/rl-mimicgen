@@ -1,6 +1,6 @@
-import torch
+import mimicgen  # noqa: F401
 import robosuite as suite
-import mimicgen
+import torch
 from robosuite.controllers import load_controller_config
 
 print("torch", torch.__version__)

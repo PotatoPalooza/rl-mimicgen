@@ -13,6 +13,7 @@ Options:
   --task TASK                  Required task name.
   --variant NAME              Limit to a specific variant. Repeatable.
   --modality NAME             Limit to a specific modality. Repeatable. Default: low_dim,image
+  --sim SIM                   Simulator to use for training. Default: mujoco
   --max-parallel N            Maximum concurrent jobs. Default: 2
   --run-root-base PATH        Base directory for per-job run roots.
   --data-dir PATH             Shared dataset directory.
@@ -82,6 +83,7 @@ DATA_DIR=""
 RUNNER_FLAGS=()
 REQUESTED_VARIANTS=()
 REQUESTED_MODALITIES=()
+SIM=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -95,6 +97,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --modality)
       REQUESTED_MODALITIES+=("$2")
+      shift 2
+      ;;
+    --sim)
+      SIM="$2"
       shift 2
       ;;
     --max-parallel)
@@ -181,7 +187,7 @@ for variant in "${REQUESTED_VARIANTS[@]}"; do
   for modality in "${REQUESTED_MODALITIES[@]}"; do
     run_root="$RUN_ROOT_BASE/${variant}_${modality}"
     log_path="$LOG_DIR/${variant}_${modality}.log"
-    cmd=(python3 -m rl_mimicgen.mimicgen.paper_bc_one_task --task "$TASK" --variant "$variant" --modality "$modality" --run-root "$run_root")
+    cmd=(python3 -m rl_mimicgen.mimicgen.paper_bc_one_task --task "$TASK" --variant "$variant" --modality "$modality" --run-root "$run_root" --sim $SIM)
     if [[ -n "$DATA_DIR" ]]; then
       cmd+=(--data-dir "$DATA_DIR")
     fi
