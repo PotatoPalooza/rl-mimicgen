@@ -137,7 +137,19 @@ class EventCfg:
 class RewardsCfg:
     """Reward terms for the MDP."""
 
-    task_reward = RewTerm(func=mdp.coffee_task_reward, weight=1.0)
+    task_reward = RewTerm(
+        func=mdp.coffee_task_reward,
+        weight=1.0,
+        params={
+            "lid_cfg": SceneEntityCfg(
+                "coffee_machine",
+                body_names="coffee_machine_lid_main",
+                joint_names="coffee_machine_lid_main_joint0",
+            ),
+            "pod_cfg": SceneEntityCfg("coffee_pod"),
+            "holder_cfg": SceneEntityCfg("coffee_machine", body_names="coffee_machine_pod_holder_root"),
+        },
+    )
 
 
 @configclass
