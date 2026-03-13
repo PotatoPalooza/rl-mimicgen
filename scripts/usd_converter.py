@@ -40,15 +40,19 @@ from isaaclab.utils.dict import print_dict  # noqa: E402
 from mimicgen.models.robosuite.objects import CoffeeMachineObject, CoffeeMachinePodObject  # noqa: E402
 from pxr import Sdf, Usd, UsdPhysics  # noqa: E402, F401
 from robosuite.models.arenas import Arena, EmptyArena, TableArena  # noqa: E402
+from robosuite.models.grippers import PandaGripper
+from robosuite.models.mounts import RethinkMount  # noqa: E402
+from robosuite.models.robots import Panda
 from robosuite.models.tasks import Task  # noqa: E402
 
 ext_manager = omni.kit.app.get_app().get_extension_manager()
 ext_manager.set_extension_enabled_immediate("isaacsim.asset.importer.mjcf", True)
 
-ALL_OBJECTS: dict[str, type] = {
+ALL_OBJECTS: dict[str, type | tuple[type, type, type]] = {
     "coffee_machine": CoffeeMachineObject,
     "coffee_pod": CoffeeMachinePodObject,
     "table": TableArena,
+    "panda": (Panda, PandaGripper, RethinkMount),
 }
 
 
@@ -65,15 +69,30 @@ def localize_assets(root: ET.Element, tag_name: str, out_dir: str, asset_dir: st
             el.set("file", new_relative_path)
 
 
-def flatten_mjcf(name: str, out_dir: str) -> str:
+def flatten_mjcf(name: str, out_dir: str) -> tuple[str, str]:
     # create scene with object
-    if issubclass(ALL_OBJECTS[name], Arena):
-        arena = ALL_OBJECTS[name]()
+    object_cls = ALL_OBJECTS[name]
+    is_robot = False
+    asset_name = name
+    if isinstance(object_cls, tuple):
+        asset_name = "robot0"
+        # for robots, we expect tuple (robot, gripper, mount)
+        robot_cls, gripper_cls, mount_cls = object_cls
+        arena = EmptyArena()
+        robot = robot_cls(idn=0)
+        robot.add_gripper(gripper_cls())
+        robot.add_mount(mount_cls())
+        task = Task(mujoco_arena=arena, mujoco_robots=[robot])
+    elif issubclass(object_cls, Arena):
+        arena = object_cls(fname=name)
         task = Task(mujoco_arena=arena, mujoco_robots=[])
     else:
         arena = EmptyArena()
         task = Task(mujoco_arena=arena, mujoco_robots=[])
-        spawned_object = ALL_OBJECTS[name](name=name)
+        try:
+            spawned_object = object_cls(name=name)
+        except TypeError:
+            spawned_object = object_cls()
         task.merge_objects([spawned_object])
 
     # convert to flattened XML
@@ -92,9 +111,11 @@ def flatten_mjcf(name: str, out_dir: str) -> str:
         # store object body
         obj_body = None
         for body in worldbody.findall("body"):
-            if (body_name := body.get("name")) and name in body_name:
+            print(body.get("name"))
+            if (body_name := body.get("name")) and asset_name in body_name:
                 obj_body = body
                 break
+        assert obj_body is not None
         # remove everything else
         worldbody.clear()
         if obj_body is not None:
@@ -113,10 +134,10 @@ def flatten_mjcf(name: str, out_dir: str) -> str:
     print(f"Flattened {name} MCJF at {out_path}")
 
     # return XML path for subsequent USD conversion
-    return out_path
+    return out_path, asset_name
 
 
-def convert_mjcf(mjcf_path: str, name: str, out_dir: str) -> None:
+def convert_mjcf(mjcf_path: str, name: str, out_dir: str, asset_name: str) -> None:
     if not check_file_path(mjcf_path):
         raise ValueError(f"Invalid file path: {mjcf_path}")
     out_dir = os.path.join(out_dir, f"{name}_usd")
@@ -150,14 +171,21 @@ def convert_mjcf(mjcf_path: str, name: str, out_dir: str) -> None:
     flat_layer = stage.Flatten()
     flat_stage = Usd.Stage.Open(flat_layer)
     base_path = Sdf.Path(f"/{name}")
-    original_root_dir = base_path.AppendChild(f"{name}_root")
+    original_root_dir = base_path.AppendChild(f"{asset_name}_root")
+    robot_root_dir = base_path.AppendChild(f"{asset_name}_base")
     temp_root_dir = base_path.AppendChild("temp_root")
     worldbody_path = base_path.AppendChild("worldBody")
 
     # Rename parent folder to avoid collisions
     if flat_stage.GetPrimAtPath(original_root_dir).IsValid():
+        root_dir = f"{asset_name}_root"
         edit = Sdf.BatchNamespaceEdit()
         edit.Add(original_root_dir, temp_root_dir)
+        flat_stage.GetRootLayer().Apply(edit)
+    elif flat_stage.GetPrimAtPath(robot_root_dir).IsValid():  # robot root links use _base instead of _root
+        root_dir = f"{asset_name}_base"
+        edit = Sdf.BatchNamespaceEdit()
+        edit.Add(robot_root_dir, temp_root_dir)
         flat_stage.GetRootLayer().Apply(edit)
 
     # Move all links out of temp_root
@@ -182,9 +210,10 @@ def convert_mjcf(mjcf_path: str, name: str, out_dir: str) -> None:
                     targets = prop.GetTargets()
                     new_targets = []
                     changed = False
-                    prefix = f"/{name}/{name}_root/"
+                    prefix = f"/{name}/{root_dir}/"
                     for t in targets:
                         path_str = t.pathString
+                        print(path_str)
                         # Looking for the old path segment
                         if path_str.startswith(prefix):
                             new_path_str = path_str.replace(prefix, f"/{name}/", 1)
@@ -207,15 +236,20 @@ def convert_mjcf(mjcf_path: str, name: str, out_dir: str) -> None:
     # ---------------------------------------
     base_prim = flat_stage.GetPrimAtPath(base_path)
     if base_prim.IsValid():
-        # Check for joints anywhere in the hierarchy
-        has_joints = False
+        all_joints = []
         for prim in Usd.PrimRange(base_prim):
             if prim.IsA(UsdPhysics.Joint):
-                has_joints = True
-                break
+                all_joints.append(prim)
 
-        if not has_joints:
-            # Count the remaining body prims
+        # Flatten if there are no joints, or a single fixed joint to world frame
+        is_flat_candidate = False
+        if len(all_joints) == 0:
+            is_flat_candidate = True
+        elif len(all_joints) == 1 and all_joints[0].IsA(UsdPhysics.FixedJoint):
+            is_flat_candidate = True
+
+        if is_flat_candidate:
+            # Count the remaining body prims (ignoring standard MJCF folders)
             body_prims = []
             for child in base_prim.GetChildren():
                 child_name = child.GetName()
@@ -226,10 +260,17 @@ def convert_mjcf(mjcf_path: str, name: str, out_dir: str) -> None:
                 single_body = body_prims[0]
                 single_body_name = single_body.GetName()
 
-                print(f"Detected single rigid body '{single_body_name}' with no joints. Flattening hierarchy...")
+                print(
+                    f"Detected single rigid body '{single_body_name}' (Joints: {len(all_joints)}). Flattening and "
+                    f"renaming to '{name}'..."
+                )
+
+                # Delete unnecessary joints
+                for joint in all_joints:
+                    flat_stage.RemovePrim(joint.GetPath())
 
                 # Rename original base to a temp path so we can free up the name
-                temp_base_path = Sdf.Path(f"/{name}_temp_delete")
+                temp_base_path = Sdf.Path(f"/{asset_name}_temp_delete")
                 edit_rename = Sdf.BatchNamespaceEdit()
                 edit_rename.Add(base_path, temp_base_path)
                 flat_stage.GetRootLayer().Apply(edit_rename)
@@ -298,8 +339,8 @@ def main() -> None:
     out_dir = os.path.abspath(args_cli.out)
     for name in objects:
         obj_out_dir = os.path.join(out_dir, name)
-        xml_path = flatten_mjcf(name, obj_out_dir)
-        convert_mjcf(xml_path, name, obj_out_dir)
+        xml_path, asset_name = flatten_mjcf(name, obj_out_dir)
+        convert_mjcf(xml_path, name, obj_out_dir, asset_name)
 
 
 if __name__ == "__main__":
