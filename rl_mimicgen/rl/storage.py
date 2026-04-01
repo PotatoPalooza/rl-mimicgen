@@ -161,6 +161,8 @@ class RolloutStorage:
 def _clone_rnn_state(state: Any) -> Any:
     if state is None:
         return None
+    if isinstance(state, dict):
+        return {key: _clone_rnn_state(value) for key, value in state.items()}
     if isinstance(state, tuple):
         return tuple(_clone_rnn_state(value) for value in state)
     if torch.is_tensor(state):
@@ -171,6 +173,8 @@ def _clone_rnn_state(state: Any) -> Any:
 def _state_to_cpu(state: Any) -> Any:
     if state is None:
         return None
+    if isinstance(state, dict):
+        return {key: _state_to_cpu(value) for key, value in state.items()}
     if isinstance(state, tuple):
         return tuple(_state_to_cpu(value) for value in state)
     if torch.is_tensor(state):
@@ -181,6 +185,8 @@ def _state_to_cpu(state: Any) -> Any:
 def _state_to_device(state: Any, device: torch.device) -> Any:
     if state is None:
         return None
+    if isinstance(state, dict):
+        return {key: _state_to_device(value, device) for key, value in state.items()}
     if isinstance(state, tuple):
         return tuple(_state_to_device(value, device) for value in state)
     if torch.is_tensor(state):

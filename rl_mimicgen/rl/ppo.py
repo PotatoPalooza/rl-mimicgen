@@ -93,6 +93,8 @@ class DemoAugmentedPPO:
         self.optimizer.param_groups[1]["lr"] = self.critic_learning_rate
 
     def update(self, batch: RolloutBatch) -> dict[str, float]:
+        batch = _detach_rollout_batch(batch)
+        self.train_mode()
         self._set_learning_rates()
 
         mean_value_loss = 0.0
@@ -195,8 +197,44 @@ class DemoAugmentedPPO:
 def _slice_rnn_state(state: Any, env_indices: torch.Tensor) -> Any:
     if state is None:
         return None
+    if isinstance(state, dict):
+        sliced = {}
+        for key, value in state.items():
+            if key == "step_count":
+                sliced[key] = int(value)
+            else:
+                sliced[key] = _slice_rnn_state(value, env_indices)
+        return sliced
     if isinstance(state, tuple):
         return tuple(_slice_rnn_state(value, env_indices) for value in state)
     if torch.is_tensor(state):
         return state[:, env_indices].detach().clone()
     raise TypeError(f"Unsupported recurrent state type: {type(state)!r}")
+
+
+def _detach_rollout_batch(batch: RolloutBatch) -> RolloutBatch:
+    return RolloutBatch(
+        observations={key: value.detach() for key, value in batch.observations.items()},
+        goals=None if batch.goals is None else {key: value.detach() for key, value in batch.goals.items()},
+        actions=batch.actions.detach(),
+        log_probs=batch.log_probs.detach(),
+        returns=batch.returns.detach(),
+        advantages=batch.advantages.detach(),
+        values=batch.values.detach(),
+        rewards=batch.rewards.detach(),
+        dones=batch.dones.detach(),
+        episode_starts=batch.episode_starts.detach(),
+        initial_rnn_state=_detach_nested_state(batch.initial_rnn_state),
+    )
+
+
+def _detach_nested_state(state: Any) -> Any:
+    if state is None:
+        return None
+    if isinstance(state, dict):
+        return {key: _detach_nested_state(value) for key, value in state.items()}
+    if isinstance(state, tuple):
+        return tuple(_detach_nested_state(value) for value in state)
+    if torch.is_tensor(state):
+        return state.detach()
+    return state

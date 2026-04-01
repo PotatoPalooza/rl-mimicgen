@@ -1,6 +1,6 @@
 """Online RL fine-tuning utilities for robomimic / MimicGen policies."""
 
-from rl_mimicgen.rl.config import DemoConfig, EvalConfig, OnlineRLConfig, OptimizerConfig, PPOConfig, RobosuiteConfig
+from rl_mimicgen.rl.config import DemoConfig, EvalConfig, OnlineRLConfig, OptimizerConfig, PPOConfig, ResidualConfig, RobosuiteConfig
 from rl_mimicgen.rl.trainer import OnlineRLTrainer
 
 __all__ = [
@@ -10,5 +10,6 @@ __all__ = [
     "OnlineRLTrainer",
     "OptimizerConfig",
     "PPOConfig",
+    "ResidualConfig",
     "RobosuiteConfig",
 ]

@@ -51,17 +51,20 @@ TASK_VARIANTS = {
     "kitchen": ["D0", "D1"],
 }
 MODALITIES = ("low_dim", "image")
+ALGORITHMS = ("bc", "diffusion_policy")
 
 
 def load_mimicgen_stack() -> dict[str, object]:
     from mimicgen import DATASET_REGISTRY, HF_REPO_ID
-    from mimicgen.scripts.generate_training_configs_for_public_datasets import generate_experiment_config
+    from mimicgen.scripts.generate_training_configs_for_public_datasets import modify_config_for_dataset
     from mimicgen.utils.file_utils import download_file_from_hf
+    from robomimic.config import config_factory
 
     return {
         "DATASET_REGISTRY": DATASET_REGISTRY,
         "HF_REPO_ID": HF_REPO_ID,
-        "generate_experiment_config": generate_experiment_config,
+        "config_factory": config_factory,
+        "modify_config_for_dataset": modify_config_for_dataset,
         "download_file_from_hf": download_file_from_hf,
     }
 
@@ -89,6 +92,7 @@ class Config:
     task: str
     variants: Optional[list[str]]
     modalities: Optional[list[str]]
+    algorithms: list[str]
     workspace_dir: Path
     run_root: Path
     data_dir: Path
@@ -200,6 +204,7 @@ class Runner:
         self.logger.info("Task: %s", self.cfg.task)
         self.logger.info("Variants: %s", ",".join(self.cfg.variants) if self.cfg.variants else "all")
         self.logger.info("Modalities: %s", ",".join(self.cfg.modalities) if self.cfg.modalities else "all")
+        self.logger.info("Algorithms: %s", ",".join(self.cfg.algorithms))
         self.logger.info("Workspace dir: %s", self.cfg.workspace_dir)
         self.logger.info("Run root: %s", self.cfg.run_root)
         self.logger.info("Data dir: %s", self.cfg.data_dir)
@@ -247,22 +252,168 @@ class Runner:
         self.write_command_file(self.cfg.core_train_commands, commands, "core training")
 
     def generate_released_dataset_training_configs(self) -> list[str]:
-        generate_experiment_config = self.stack["generate_experiment_config"]
         config_paths: list[str] = []
         for dataset_name in RELEASED_CORE_TASKS[self.cfg.task]:
-            for obs_modality in ("low_dim", "image"):
-                _, config_path = generate_experiment_config(
-                    base_exp_name="core",
-                    base_config_dir=str(self.cfg.core_train_config_dir),
-                    base_dataset_dir=str(self.cfg.data_dir),
-                    base_output_dir=str(self.cfg.core_train_output_dir),
-                    dataset_type="core",
-                    task_name=dataset_name,
-                    obs_modality=obs_modality,
-                )
-                config_paths.append(config_path)
+            for obs_modality in MODALITIES:
+                for algo_name in self.cfg.algorithms:
+                    config_path = self.generate_training_config(
+                        dataset_name=dataset_name,
+                        obs_modality=obs_modality,
+                        algo_name=algo_name,
+                    )
+                    config_paths.append(config_path)
         self.rewrite_training_output_dirs(config_paths)
         return config_paths
+
+    def generate_training_config(self, dataset_name: str, obs_modality: str, algo_name: str) -> str:
+        config_factory = self.stack["config_factory"]
+        modify_config_for_dataset = self.stack["modify_config_for_dataset"]
+        config = config_factory(algo_name=algo_name)
+
+        if algo_name == "bc":
+            config = self.configure_bc(config=config, obs_modality=obs_modality)
+            file_name = "bc_rnn.json"
+        elif algo_name == "diffusion_policy":
+            config = self.configure_diffusion_policy(config=config, obs_modality=obs_modality)
+            file_name = "diffusion_policy.json"
+        else:
+            raise ValueError(f"Unsupported algorithm: {algo_name}")
+
+        config = modify_config_for_dataset(
+            config=config,
+            dataset_type="core",
+            task_name=dataset_name,
+            obs_modality=obs_modality,
+            base_dataset_dir=str(self.cfg.data_dir),
+        )
+
+        experiment_name = f"core_{dataset_name}_{obs_modality}" if algo_name == "bc" else f"core_{dataset_name}_{obs_modality}_{algo_name}"
+        with config.experiment.values_unlocked():
+            config.experiment.name = experiment_name
+        with config.train.values_unlocked():
+            config.train.output_dir = os.path.join(
+                str(self.cfg.core_train_output_dir),
+                "core",
+                dataset_name,
+                obs_modality,
+                algo_name,
+                "trained_models",
+            )
+
+        dir_to_save = self.cfg.core_train_config_dir / "core" / dataset_name / obs_modality / algo_name
+        dir_to_save.mkdir(parents=True, exist_ok=True)
+        json_path = dir_to_save / file_name
+        config.dump(filename=str(json_path))
+        return str(json_path)
+
+    def configure_bc(self, config, obs_modality: str):
+        with config.train.values_unlocked():
+            config.train.seq_length = 10
+
+        with config.algo.values_unlocked():
+            config.algo.rnn.enabled = True
+            config.algo.rnn.horizon = 10
+            config.algo.actor_layer_dims = ()
+            config.algo.gmm.enabled = True
+            config.algo.rnn.hidden_dim = 400
+
+        if obs_modality == "low_dim":
+            self.apply_low_dim_defaults(config)
+            with config.algo.values_unlocked():
+                config.algo.optim_params.policy.learning_rate.initial = 1e-3
+        else:
+            self.apply_image_defaults(config)
+            with config.algo.values_unlocked():
+                config.algo.optim_params.policy.learning_rate.initial = 1e-4
+                config.algo.rnn.hidden_dim = 1000
+        return config
+
+    def configure_diffusion_policy(self, config, obs_modality: str):
+        if obs_modality == "low_dim":
+            self.apply_low_dim_defaults(config)
+        else:
+            self.apply_image_defaults(config)
+
+        with config.train.values_unlocked():
+            config.train.seq_length = int(config.algo.horizon.prediction_horizon)
+            config.train.action_config["actions"]["normalization"] = "min_max"
+
+        return config
+
+    def apply_low_dim_defaults(self, config) -> None:
+        with config.experiment.values_unlocked():
+            config.experiment.save.enabled = True
+            config.experiment.save.every_n_epochs = 50
+            config.experiment.epoch_every_n_steps = 100
+            config.experiment.validation_epoch_every_n_steps = 10
+            config.experiment.rollout.enabled = True
+            config.experiment.rollout.n = 50
+            config.experiment.rollout.horizon = 400
+            config.experiment.rollout.rate = 50
+            config.experiment.rollout.warmstart = 0
+            config.experiment.rollout.terminate_on_success = True
+
+        with config.train.values_unlocked():
+            config.train.num_data_workers = 0
+            config.train.hdf5_cache_mode = "all"
+            config.train.batch_size = 100
+            config.train.num_epochs = 2000
+
+        with config.observation.values_unlocked():
+            config.observation.modalities.obs.low_dim = [
+                "robot0_eef_pos",
+                "robot0_eef_quat",
+                "robot0_gripper_qpos",
+                "object",
+            ]
+            config.observation.modalities.obs.rgb = []
+
+    def apply_image_defaults(self, config) -> None:
+        with config.experiment.values_unlocked():
+            config.experiment.save.enabled = True
+            config.experiment.save.every_n_epochs = 20
+            config.experiment.epoch_every_n_steps = 500
+            config.experiment.validation_epoch_every_n_steps = 50
+            config.experiment.rollout.enabled = True
+            config.experiment.rollout.n = 50
+            config.experiment.rollout.horizon = 400
+            config.experiment.rollout.rate = 20
+            config.experiment.rollout.warmstart = 0
+            config.experiment.rollout.terminate_on_success = True
+
+        with config.train.values_unlocked():
+            config.train.num_data_workers = 2
+            config.train.hdf5_cache_mode = "low_dim"
+            config.train.batch_size = 16
+            config.train.num_epochs = 600
+
+        with config.observation.values_unlocked():
+            config.observation.modalities.obs.low_dim = [
+                "robot0_eef_pos",
+                "robot0_eef_quat",
+                "robot0_gripper_qpos",
+            ]
+            config.observation.modalities.obs.rgb = [
+                "agentview_image",
+                "robot0_eye_in_hand_image",
+            ]
+            config.observation.modalities.goal.low_dim = []
+            config.observation.modalities.goal.rgb = []
+            config.observation.encoder.rgb.core_class = "VisualCore"
+            config.observation.encoder.rgb.core_kwargs.feature_dimension = 64
+            config.observation.encoder.rgb.core_kwargs.backbone_class = "ResNet18Conv"
+            config.observation.encoder.rgb.core_kwargs.backbone_kwargs.pretrained = False
+            config.observation.encoder.rgb.core_kwargs.backbone_kwargs.input_coord_conv = False
+            config.observation.encoder.rgb.core_kwargs.pool_class = "SpatialSoftmax"
+            config.observation.encoder.rgb.core_kwargs.pool_kwargs.num_kp = 32
+            config.observation.encoder.rgb.core_kwargs.pool_kwargs.learnable_temperature = False
+            config.observation.encoder.rgb.core_kwargs.pool_kwargs.temperature = 1.0
+            config.observation.encoder.rgb.core_kwargs.pool_kwargs.noise_std = 0.0
+            config.observation.encoder.rgb.obs_randomizer_class = "CropRandomizer"
+            config.observation.encoder.rgb.obs_randomizer_kwargs.crop_height = 76
+            config.observation.encoder.rgb.obs_randomizer_kwargs.crop_width = 76
+            config.observation.encoder.rgb.obs_randomizer_kwargs.num_crops = 1
+            config.observation.encoder.rgb.obs_randomizer_kwargs.pos_enc = False
 
     def rewrite_training_output_dirs(self, config_paths: list[str]) -> None:
         for config_path in config_paths:
@@ -384,7 +535,7 @@ def parse_args(argv: Optional[list[str]] = None) -> Config:
     task_choices = sorted(RELEASED_CORE_TASKS)
     default_run_root = workspace_dir / "runs" / os.environ.get("RUN_NAME", f"paper_bc_one_task_{now_stamp()}")
     data_dir_env = os.environ.get("DATA_DIR")
-    parser = argparse.ArgumentParser(description="Train BC for one task from released MimicGen core datasets.")
+    parser = argparse.ArgumentParser(description="Train MimicGen policies for one task from released core datasets.")
     parser.add_argument("--task", required=True, choices=task_choices, help="Paper task to train.")
     parser.add_argument(
         "--variant",
@@ -398,6 +549,13 @@ def parse_args(argv: Optional[list[str]] = None) -> Config:
         action="append",
         choices=MODALITIES,
         help="Limit training to one or more modalities.",
+    )
+    parser.add_argument(
+        "--algo",
+        dest="algorithms",
+        action="append",
+        choices=ALGORITHMS,
+        help="Training algorithm to generate configs for. Repeat to run multiple algorithms. Default: bc.",
     )
     add_bool_arg(
         parser,
@@ -414,6 +572,7 @@ def parse_args(argv: Optional[list[str]] = None) -> Config:
     data_dir = args.data_dir if args.data_dir is not None else run_root.parent / "datasets"
     variants = sorted({value.upper() for value in args.variants}) if args.variants else None
     modalities = sorted(set(args.modalities)) if args.modalities else None
+    algorithms = sorted(set(args.algorithms)) if args.algorithms else ["bc"]
     if variants is not None:
         invalid_variants = sorted(set(variants) - set(TASK_VARIANTS[args.task]))
         if invalid_variants:
@@ -425,6 +584,7 @@ def parse_args(argv: Optional[list[str]] = None) -> Config:
         task=args.task,
         variants=variants,
         modalities=modalities,
+        algorithms=algorithms,
         workspace_dir=workspace_dir,
         run_root=run_root,
         data_dir=data_dir.resolve(),

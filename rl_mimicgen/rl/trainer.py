@@ -35,6 +35,8 @@ class OnlineRLTrainer:
             device=self.device,
             init_log_std=config.ppo.init_log_std,
             min_log_std=config.ppo.min_log_std,
+            residual_enabled=config.residual.enabled,
+            residual_scale=config.residual.scale,
         )
 
         self.env = self._build_vector_env()
@@ -102,21 +104,21 @@ class OnlineRLTrainer:
             self.algorithm.train_mode()
             self.algorithm.demo_coef = self.current_demo_coef
             self.storage.reset()
-            self.storage.set_initial_rnn_state(self.policy.clone_rollout_state())
+            self.storage.set_initial_rnn_state(self.policy.clone_training_rollout_state())
 
             for _ in range(self.config.rollout_steps):
-                actions, log_probs, values = self.policy.act(
+                env_actions, policy_actions, log_probs, values = self.policy.act(
                     obs=obs,
                     goal=goal,
                     episode_starts=episode_starts,
                     clip_actions=self.config.ppo.clip_actions,
                 )
-                next_obs, rewards, terminated, truncated, infos = self.env.step(actions)
+                next_obs, rewards, terminated, truncated, infos = self.env.step(env_actions)
                 done = terminated | truncated
 
                 self.storage.add(
                     obs=obs,
-                    actions=actions,
+                    actions=policy_actions,
                     goals=goal,
                     log_probs=log_probs,
                     rewards=rewards,
@@ -327,34 +329,38 @@ class OnlineRLTrainer:
         }
 
     def save_checkpoint(self, tag: str) -> None:
-        policy_path = self.output_dir / f"policy_{tag}.pth"
-        torch.save(self.policy.export_robomimic_checkpoint(), policy_path)
+        policy_path = self.output_dir / f"policy_{tag}{self.policy.policy_artifact_extension()}"
+        torch.save(self.policy.export_policy_artifact(self.config.checkpoint_path), policy_path)
 
         trainer_state = {
             "ppo_state": self.algorithm.save(),
+            "actor_state": self.policy.actor.state_dict(),
             "value_net": self.policy.value_net.state_dict(),
             "learned_log_std": None
             if self.policy.learned_log_std is None
             else self.policy.learned_log_std.detach().cpu(),
             "demo_coef": self.current_demo_coef,
             "config": self.config.to_dict(),
+            "residual_enabled": self.policy.residual_enabled,
         }
         torch.save(trainer_state, self.output_dir / f"trainer_{tag}.pt")
 
     def save_best_checkpoint(self, update: int, success_rate: float) -> None:
         success_str = f"{success_rate:.4f}"
-        policy_path = self.output_dir / f"policy_best_update_{update:04d}_success_{success_str}.pth"
+        policy_path = self.output_dir / f"policy_best_update_{update:04d}_success_{success_str}{self.policy.policy_artifact_extension()}"
         trainer_path = self.output_dir / f"trainer_best_update_{update:04d}_success_{success_str}.pt"
 
-        torch.save(self.policy.export_robomimic_checkpoint(), policy_path)
+        torch.save(self.policy.export_policy_artifact(self.config.checkpoint_path), policy_path)
         trainer_state = {
             "ppo_state": self.algorithm.save(),
+            "actor_state": self.policy.actor.state_dict(),
             "value_net": self.policy.value_net.state_dict(),
             "learned_log_std": None
             if self.policy.learned_log_std is None
             else self.policy.learned_log_std.detach().cpu(),
             "demo_coef": self.current_demo_coef,
             "config": self.config.to_dict(),
+            "residual_enabled": self.policy.residual_enabled,
             "best_success_rate": success_rate,
             "best_update": update,
         }
@@ -437,7 +443,10 @@ class OnlineRLTrainer:
         get_goal = getattr(env, "get_goal", None)
         if not callable(get_goal):
             return None
-        return get_goal()
+        try:
+            return get_goal()
+        except (AttributeError, NotImplementedError):
+            return None
 
     def _log_metrics(self, metrics: dict[str, float]) -> None:
         with open(self.metrics_path, "a", encoding="utf-8") as f:

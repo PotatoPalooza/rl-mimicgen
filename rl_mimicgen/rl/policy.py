@@ -55,6 +55,8 @@ class OnlinePolicyAdapter(nn.Module):
         value_hidden_sizes: tuple[int, ...] = (256, 256),
         init_log_std: float = -0.5,
         min_log_std: float = -2.0,
+        residual_enabled: bool = False,
+        residual_scale: float = 0.2,
     ) -> None:
         super().__init__()
         self.bundle = bundle
@@ -71,6 +73,9 @@ class OnlinePolicyAdapter(nn.Module):
         self.uses_stochastic_head = bool(
             _config_enabled(bundle.config.algo, "gmm") or _config_enabled(bundle.config.algo, "gaussian")
         )
+        self.rnn_horizon = int(getattr(bundle.config.algo.rnn, "horizon", 0)) if self.is_recurrent else 0
+        self.residual_enabled = bool(residual_enabled)
+        self.residual_scale = float(residual_scale)
 
         self.value_net = ValueNetwork(
             obs_shapes=self.obs_shapes,
@@ -84,7 +89,17 @@ class OnlinePolicyAdapter(nn.Module):
         if not self.uses_stochastic_head:
             self.learned_log_std = nn.Parameter(torch.full((bundle.shape_meta["ac_dim"],), init_log_std, device=device))
 
+        self.base_actor = None
+        if self.residual_enabled:
+            self.base_actor = deepcopy(self.actor).float().to(device)
+            self.base_actor.eval()
+            for param in self.base_actor.parameters():
+                param.requires_grad_(False)
+
         self._rollout_rnn_state = None
+        self._base_rollout_rnn_state = None
+        self._rollout_step_count = 0
+        self._base_rollout_step_count = 0
 
     def actor_parameters(self) -> list[nn.Parameter]:
         params = list(self.actor.parameters())
@@ -94,13 +109,36 @@ class OnlinePolicyAdapter(nn.Module):
 
     def reset_rollout_state(self) -> None:
         self._rollout_rnn_state = None
+        self._base_rollout_rnn_state = None
+        self._rollout_step_count = 0
+        self._base_rollout_step_count = 0
         self.algo.reset()
 
     def clone_rollout_state(self) -> Any:
+        if self.residual_enabled:
+            return (
+                _clone_rnn_state(self._rollout_rnn_state),
+                _clone_rnn_state(self._base_rollout_rnn_state),
+                self._rollout_step_count,
+                self._base_rollout_step_count,
+            )
         return _clone_rnn_state(self._rollout_rnn_state)
 
     def restore_rollout_state(self, state: Any) -> None:
+        if self.residual_enabled:
+            residual_state, base_state, rollout_step_count, base_rollout_step_count = state
+            self._rollout_rnn_state = _clone_rnn_state(residual_state)
+            self._base_rollout_rnn_state = _clone_rnn_state(base_state)
+            self._rollout_step_count = int(rollout_step_count)
+            self._base_rollout_step_count = int(base_rollout_step_count)
+            return
         self._rollout_rnn_state = _clone_rnn_state(state)
+
+    def clone_training_rollout_state(self) -> Any:
+        return {
+            "hidden_state": _clone_rnn_state(self._rollout_rnn_state),
+            "step_count": int(self._rollout_step_count),
+        }
 
     def clone_hidden_state(self, state: Any) -> Any:
         return _clone_rnn_state(state)
@@ -151,6 +189,28 @@ class OnlinePolicyAdapter(nn.Module):
             dist = self._make_det_policy_dist(mean_action)
         return dist, None
 
+    def _dist_from_actor(
+        self,
+        actor_module: nn.Module,
+        obs: dict[str, torch.Tensor],
+        goal: dict[str, torch.Tensor] | None,
+        rnn_state: Any = None,
+    ):
+        if self.is_recurrent:
+            if self.uses_stochastic_head:
+                dist, next_state = actor_module.forward_train_step(obs_dict=obs, goal_dict=goal, rnn_state=rnn_state)
+            else:
+                mean_action, next_state = actor_module.forward_step(obs_dict=obs, goal_dict=goal, rnn_state=rnn_state)
+                dist = self._make_det_policy_dist(mean_action)
+            return dist, next_state
+
+        if self.uses_stochastic_head:
+            dist = actor_module.forward_train(obs_dict=obs, goal_dict=goal)
+        else:
+            mean_action = actor_module(obs_dict=obs, goal_dict=goal)
+            dist = self._make_det_policy_dist(mean_action)
+        return dist, None
+
     def _init_rnn_state(self, batch_size: int) -> Any:
         return self.actor.get_rnn_init_state(batch_size=batch_size, device=self.device)
 
@@ -163,8 +223,44 @@ class OnlinePolicyAdapter(nn.Module):
         state[:, reset_mask] = 0
         return state
 
+    def _base_action_step(
+        self,
+        obs: dict[str, torch.Tensor],
+        goal: dict[str, torch.Tensor] | None,
+        episode_starts: np.ndarray | torch.Tensor,
+    ) -> torch.Tensor:
+        assert self.base_actor is not None
+        batch_size = next(iter(obs.values())).shape[0]
+        if self.is_recurrent:
+            if self._base_rollout_rnn_state is None or (self.rnn_horizon > 0 and self._base_rollout_step_count % self.rnn_horizon == 0):
+                self._base_rollout_rnn_state = self._init_rnn_state(batch_size=batch_size)
+            reset_mask = torch.as_tensor(episode_starts, device=self.device, dtype=torch.bool)
+            self._base_rollout_rnn_state = self._reset_state_indices(self._base_rollout_rnn_state, reset_mask)
+        base_dist, next_state = self._dist_from_actor(self.base_actor, obs, goal, self._base_rollout_rnn_state)
+        self._base_rollout_rnn_state = next_state
+        self._base_rollout_step_count += 1
+        return _distribution_mode(base_dist).detach()
+
+    def _predict_actor_actions(
+        self,
+        actor_module: nn.Module,
+        obs_batch: dict[str, torch.Tensor],
+        goal_batch: dict[str, torch.Tensor] | None,
+    ) -> torch.Tensor:
+        if self.is_recurrent:
+            if self.uses_stochastic_head:
+                dist = actor_module.forward_train(obs_dict=obs_batch, goal_dict=goal_batch)
+                return _distribution_mode(dist)
+            return actor_module.forward(obs_dict=obs_batch, goal_dict=goal_batch)
+        if self.uses_stochastic_head:
+            dist = actor_module.forward_train(obs_dict=obs_batch, goal_dict=goal_batch)
+            return _distribution_mode(dist)
+        return actor_module(obs_dict=obs_batch, goal_dict=goal_batch)
+
     def act(self, obs: dict[str, np.ndarray], goal: dict[str, np.ndarray] | None, episode_starts: np.ndarray, clip_actions: bool = True):
         with torch.no_grad():
+            # PPO rollouts must come from the same train-time distribution family
+            # that PPO later replays against; eval mode can enable low_noise_eval.
             self.actor.train()
             self.value_net.eval()
 
@@ -173,21 +269,26 @@ class OnlinePolicyAdapter(nn.Module):
             batch_size = next(iter(obs_batch.values())).shape[0]
 
             if self.is_recurrent:
-                if self._rollout_rnn_state is None:
+                if self._rollout_rnn_state is None or (self.rnn_horizon > 0 and self._rollout_step_count % self.rnn_horizon == 0):
                     self._rollout_rnn_state = self._init_rnn_state(batch_size=batch_size)
                 reset_mask = torch.as_tensor(episode_starts, device=self.device, dtype=torch.bool)
                 self._rollout_rnn_state = self._reset_state_indices(self._rollout_rnn_state, reset_mask)
 
             dist, next_state = self._dist_from_step(obs_batch, goal_batch, self._rollout_rnn_state)
-            action_tensor = dist.sample()
+            policy_action_tensor = dist.sample()
+            action_tensor = policy_action_tensor
+            if self.residual_enabled:
+                action_tensor = self._base_action_step(obs_batch, goal_batch, episode_starts) + (self.residual_scale * policy_action_tensor)
             if clip_actions:
                 action_tensor = action_tensor.clamp(-1.0, 1.0)
-            log_prob = dist.log_prob(action_tensor)
+            log_prob = dist.log_prob(policy_action_tensor)
             value = self.value_net(obs_batch, goal_dict=goal_batch).squeeze(-1)
 
             self._rollout_rnn_state = next_state
+            self._rollout_step_count += 1
             return (
                 TensorUtils.to_numpy(action_tensor),
+                TensorUtils.to_numpy(policy_action_tensor),
                 TensorUtils.to_numpy(log_prob),
                 TensorUtils.to_numpy(value),
             )
@@ -208,17 +309,22 @@ class OnlinePolicyAdapter(nn.Module):
             batch_size = next(iter(obs_batch.values())).shape[0]
 
             if self.is_recurrent:
-                if self._rollout_rnn_state is None:
+                if self._rollout_rnn_state is None or (self.rnn_horizon > 0 and self._rollout_step_count % self.rnn_horizon == 0):
                     self._rollout_rnn_state = self._init_rnn_state(batch_size=batch_size)
                 reset_mask = torch.as_tensor(episode_starts, device=self.device, dtype=torch.bool)
                 self._rollout_rnn_state = self._reset_state_indices(self._rollout_rnn_state, reset_mask)
 
             dist, next_state = self._dist_from_step(obs_batch, goal_batch, self._rollout_rnn_state)
-            action_tensor = _distribution_mode(dist)
+            # For robomimic stochastic BC policies, eval mode already applies
+            # low-noise action generation. Sampling here preserves that behavior.
+            action_tensor = dist.sample() if self.uses_stochastic_head else _distribution_mode(dist)
+            if self.residual_enabled:
+                action_tensor = self._base_action_step(obs_batch, goal_batch, episode_starts) + (self.residual_scale * action_tensor)
             if clip_actions:
                 action_tensor = action_tensor.clamp(-1.0, 1.0)
 
             self._rollout_rnn_state = next_state
+            self._rollout_step_count += 1
             return TensorUtils.to_numpy(action_tensor)
 
     def evaluate_actions_rollout(
@@ -230,13 +336,17 @@ class OnlinePolicyAdapter(nn.Module):
         initial_rnn_state: Any = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         rollout_steps, num_envs = next(iter(observations.values())).shape[:2]
+        step_count = 0
+        if isinstance(initial_rnn_state, dict):
+            step_count = int(initial_rnn_state.get("step_count", 0))
+            initial_rnn_state = initial_rnn_state.get("hidden_state")
         if self.is_recurrent:
             log_probs = []
             entropies = []
             rnn_state = self.clone_hidden_state(initial_rnn_state)
-            if rnn_state is None:
-                rnn_state = self._init_rnn_state(batch_size=num_envs)
             for step in range(rollout_steps):
+                if rnn_state is None or (self.rnn_horizon > 0 and step_count % self.rnn_horizon == 0):
+                    rnn_state = self._init_rnn_state(batch_size=num_envs)
                 reset_mask = episode_starts[step].to(dtype=torch.bool)
                 rnn_state = self._reset_state_indices(rnn_state, reset_mask)
                 obs_batch = {key: value[step] for key, value in observations.items()}
@@ -244,6 +354,7 @@ class OnlinePolicyAdapter(nn.Module):
                 dist, rnn_state = self._dist_from_step(obs_batch, goal_batch, rnn_state)
                 log_probs.append(dist.log_prob(actions[step]))
                 entropies.append(_safe_entropy(dist))
+                step_count += 1
             return torch.stack(log_probs, dim=0).reshape(-1), torch.stack(entropies, dim=0).reshape(-1)
 
         flat_obs = {key: value.reshape(-1, *value.shape[2:]) for key, value in observations.items()}
@@ -265,17 +376,58 @@ class OnlinePolicyAdapter(nn.Module):
             return TensorUtils.to_numpy(value)
 
     def demo_loss(self, batch: dict) -> torch.Tensor:
-        self.algo.set_train()
-        processed = self.algo.process_batch_for_training(batch)
-        processed = self.algo.postprocess_batch_for_training(processed, obs_normalization_stats=self.obs_normalization_stats)
-        predictions = self.algo._forward_training(processed)  # type: ignore[attr-defined]
-        losses = self.algo._compute_losses(predictions, processed)  # type: ignore[attr-defined]
-        return losses["action_loss"]
+        if self.residual_enabled:
+            return self._residual_demo_loss(batch)
+        return self._standard_demo_loss(batch)
 
     def export_robomimic_checkpoint(self) -> dict:
+        if self.residual_enabled:
+            raise RuntimeError("Residual policies are not exportable as plain robomimic checkpoints.")
         ckpt = deepcopy(self.bundle.ckpt_dict)
         ckpt["model"] = self.algo.serialize()
         return ckpt
+
+    def export_policy_artifact(self, checkpoint_path: str) -> dict:
+        if not self.residual_enabled:
+            return self.export_robomimic_checkpoint()
+        return {
+            "mode": "residual",
+            "base_checkpoint_path": checkpoint_path,
+            "base_checkpoint": deepcopy(self.bundle.ckpt_dict),
+            "residual_actor_state": self.actor.state_dict(),
+            "residual_log_std": None if self.learned_log_std is None else self.learned_log_std.detach().cpu(),
+            "residual_scale": self.residual_scale,
+        }
+
+    def policy_artifact_extension(self) -> str:
+        return ".pt" if self.residual_enabled else ".pth"
+
+    def _residual_demo_loss(self, batch: dict) -> torch.Tensor:
+        processed = self.algo.process_batch_for_training(batch)
+        processed = self.algo.postprocess_batch_for_training(processed, obs_normalization_stats=self.obs_normalization_stats)
+        obs_batch = processed["obs"]
+        goal_batch = processed.get("goal_obs", None)
+        target_actions = processed["actions"]
+        assert self.base_actor is not None
+        residual_actions = self._predict_actor_actions(self.actor, obs_batch, goal_batch)
+        with torch.no_grad():
+            base_actions = self._predict_actor_actions(self.base_actor, obs_batch, goal_batch)
+        predicted_actions = torch.clamp(base_actions + (self.residual_scale * residual_actions), -1.0, 1.0)
+        return torch.mean((predicted_actions - target_actions) ** 2)
+
+    def _standard_demo_loss(self, batch: dict) -> torch.Tensor:
+        processed = self.algo.process_batch_for_training(batch)
+        processed = self.algo.postprocess_batch_for_training(processed, obs_normalization_stats=self.obs_normalization_stats)
+        obs_batch = processed["obs"]
+        goal_batch = processed.get("goal_obs", None)
+        target_actions = processed["actions"]
+
+        if self.uses_stochastic_head:
+            dist = self.actor.forward_train(obs_dict=obs_batch, goal_dict=goal_batch)
+            return -dist.log_prob(target_actions).mean()
+
+        predicted_actions = self.actor.forward(obs_dict=obs_batch, goal_dict=goal_batch)
+        return torch.mean((predicted_actions - target_actions) ** 2)
 
 
 def _safe_entropy(dist: D.Distribution) -> torch.Tensor:
@@ -296,6 +448,8 @@ def _safe_entropy(dist: D.Distribution) -> torch.Tensor:
 
 
 def _distribution_mode(dist: D.Distribution) -> torch.Tensor:
+    if isinstance(dist, TanhWrappedDistribution):
+        return torch.tanh(dist.base_dist.mean) * dist.scale
     if hasattr(dist, "mean"):
         return dist.mean
     if hasattr(dist, "component_distribution") and hasattr(dist, "mixture_distribution"):

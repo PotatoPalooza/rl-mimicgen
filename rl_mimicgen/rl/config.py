@@ -40,6 +40,12 @@ class DemoConfig:
 
 
 @dataclass
+class ResidualConfig:
+    enabled: bool = False
+    scale: float = 0.2
+
+
+@dataclass
 class EvalConfig:
     enabled: bool = True
     episodes: int = 5
@@ -75,6 +81,7 @@ class OnlineRLConfig:
     optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
     ppo: PPOConfig = field(default_factory=PPOConfig)
     demo: DemoConfig = field(default_factory=DemoConfig)
+    residual: ResidualConfig = field(default_factory=ResidualConfig)
     evaluation: EvalConfig = field(default_factory=EvalConfig)
     robosuite: RobosuiteConfig = field(default_factory=RobosuiteConfig)
 
@@ -88,6 +95,7 @@ class OnlineRLConfig:
                 "optimizer": OptimizerConfig(**data.get("optimizer", {})),
                 "ppo": PPOConfig(**data.get("ppo", {})),
                 "demo": DemoConfig(**data.get("demo", {})),
+                "residual": ResidualConfig(**data.get("residual", {})),
                 "evaluation": EvalConfig(**data.get("evaluation", {})),
                 "robosuite": RobosuiteConfig(**data.get("robosuite", {})),
             }
