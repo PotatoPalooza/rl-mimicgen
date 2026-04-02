@@ -35,6 +35,8 @@ def main() -> None:
     parser.add_argument("--eval_num_envs", type=int, default=None, help="Number of parallel environments to use during evaluation.")
     parser.add_argument("--demo_coef", type=float, default=None, help="Initial demo BC loss weight.")
     parser.add_argument("--demo_decay", type=float, default=None, help="Per-update decay applied to demo BC loss.")
+    parser.add_argument("--residual", action="store_true", help="Enable residual policy fine-tuning on top of the BC checkpoint.")
+    parser.add_argument("--residual_scale", type=float, default=None, help="Scale factor applied to residual actions before adding to the frozen BC action.")
     args = parser.parse_args()
 
     config = OnlineRLConfig.from_json(args.config) if args.config is not None else OnlineRLConfig()
@@ -66,6 +68,10 @@ def main() -> None:
         config.demo.coef = args.demo_coef
     if args.demo_decay is not None:
         config.demo.decay = args.demo_decay
+    if args.residual:
+        config.residual.enabled = True
+    if args.residual_scale is not None:
+        config.residual.scale = args.residual_scale
 
     trainer = OnlineRLTrainer(config)
     trainer.train()

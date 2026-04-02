@@ -216,3 +216,7 @@ robosuite-task-zoo
 mimicgen
 
 uv.lock
+analysis
+config
+.codex
+tmp.txt

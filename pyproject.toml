@@ -4,11 +4,13 @@ version = "0.1.0"
 description = "RL + Mimicgen (Blackwell Env)"
 requires-python = ">=3.10,<3.13"
 dependencies = [
+  "cloudpickle",
+  "gymnasium",
   "mujoco==2.3.2",
   "torch==2.7.1",
   "torchvision==0.22.1",
   "torchaudio==2.7.1",
-  "rsl-rl-lib",
+  "tensordict",
   "mimicgen",
   "robosuite",
   "robomimic",

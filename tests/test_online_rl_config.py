@@ -17,4 +17,6 @@ def test_online_rl_config_round_trip(tmp_path) -> None:
     assert loaded.ppo.min_log_std == -2.0
     assert loaded.ppo.critic_warmup_updates == 0
     assert loaded.ppo.actor_freeze_env_steps == 8192
+    assert loaded.residual.enabled is False
+    assert loaded.residual.scale == 0.2
     assert loaded.evaluation.num_envs == 8

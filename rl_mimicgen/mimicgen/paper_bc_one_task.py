@@ -334,7 +334,11 @@ class Runner:
         else:
             self.apply_image_defaults(config)
 
+        with config.experiment.values_unlocked():
+            config.experiment.render_video = False
+
         with config.train.values_unlocked():
+            config.train.hdf5_load_next_obs = False
             config.train.seq_length = int(config.algo.horizon.prediction_horizon)
             config.train.action_config["actions"]["normalization"] = "min_max"
 
