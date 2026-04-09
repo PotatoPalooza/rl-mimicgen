@@ -100,6 +100,7 @@ class Config:
     include_robot_transfer: bool
     tasks: Optional[list[str]]
     dry_run: bool
+    warp: bool
 
     @property
     def command_dir(self) -> Path:
@@ -212,7 +213,7 @@ class Runner:
         self.logger.info("Data dir: %s", self.cfg.data_dir)
         self.logger.info("Tasks: %s", ",".join(self.cfg.tasks) if self.cfg.tasks else "all")
         self.logger.info(
-            "NUM_TRAJ=%s GUARANTEE=%s RUN_GENERATION=%s RUN_TRAINING=%s TRAINING_DATA=%s ROBOT_TRANSFER=%s DRY_RUN=%s",
+            "NUM_TRAJ=%s GUARANTEE=%s RUN_GENERATION=%s RUN_TRAINING=%s TRAINING_DATA=%s ROBOT_TRANSFER=%s DRY_RUN=%s WARP=%s",
             self.cfg.num_traj,
             int(self.cfg.guarantee),
             int(self.cfg.run_generation),
@@ -220,6 +221,7 @@ class Runner:
             self.cfg.training_data,
             int(self.cfg.include_robot_transfer),
             int(self.cfg.dry_run),
+            int(self.cfg.warp),
         )
 
     def ensure_optional_dependencies(self) -> None:
@@ -434,6 +436,24 @@ class Runner:
         lines = self.filter_command_lines(self.dataset_generation_command_lines(lines), "robot dataset")
         self.write_command_file(self.cfg.robot_dataset_commands, lines, "robot dataset")
 
+    def inject_warp_into_configs(self, config_paths: list[str]) -> None:
+        for config_path in config_paths:
+            path = Path(config_path)
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload.setdefault("experiment", {}).setdefault("rollout", {})["use_warp"] = True
+            path.write_text(json.dumps(payload, indent=4) + "\n", encoding="utf-8")
+            self.logger.info("Enabled use_warp in %s", config_path)
+
+    def _config_paths_from_lines(self, lines: list[str]) -> list[str]:
+        """Extract --config paths from a list of command strings."""
+        import shlex as _shlex
+        paths: list[str] = []
+        for line in lines:
+            cmd = _shlex.split(line)
+            if "--config" in cmd:
+                paths.append(cmd[cmd.index("--config") + 1])
+        return paths
+
     def generate_core_training_commands(self) -> None:
         if self.cfg.training_data == "source":
             self.generate_source_training_commands()
@@ -447,6 +467,8 @@ class Runner:
         )
         _, lines = config_generator_to_script_lines(generators, config_dir=str(self.cfg.core_train_config_dir))
         lines = self.filter_command_lines(self.training_command_lines(lines), "core training")
+        if self.cfg.warp:
+            self.inject_warp_into_configs(self._config_paths_from_lines(lines))
         self.write_command_file(self.cfg.core_train_commands, lines, "core training")
 
     def generate_source_training_commands(self) -> None:
@@ -481,6 +503,8 @@ class Runner:
         )
         _, lines = config_generator_to_script_lines(generators, config_dir=str(self.cfg.robot_train_config_dir))
         lines = self.filter_command_lines(self.training_command_lines(lines), "robot training")
+        if self.cfg.warp:
+            self.inject_warp_into_configs(self._config_paths_from_lines(lines))
         self.write_command_file(self.cfg.robot_train_commands, lines, "robot training")
 
     def run_command_file(self, label: str, path: Path) -> None:
@@ -564,6 +588,7 @@ def parse_args(argv: Optional[list[str]] = None) -> Config:
     )
     add_bool_arg(parser, "include-robot-transfer", env_bool("INCLUDE_ROBOT_TRANSFER", False), "Include robot-transfer generation and training stages.")
     add_bool_arg(parser, "dry-run", env_bool("DRY_RUN", False), "Log stages without executing them.")
+    add_bool_arg(parser, "warp", env_bool("WARP", False), "Enable MuJoCo Warp GPU-parallel rollouts in generated training configs.")
     args = parser.parse_args(argv)
     tasks = sorted(set(args.tasks)) if args.tasks else None
     return Config(
@@ -580,6 +605,7 @@ def parse_args(argv: Optional[list[str]] = None) -> Config:
         include_robot_transfer=args.include_robot_transfer,
         tasks=tasks,
         dry_run=args.dry_run,
+        warp=args.warp,
     )
 
 

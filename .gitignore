@@ -210,9 +210,10 @@ __marimo__/
 cache
 runs
 logs
-robomimic
-robosuite
-robosuite-task-zoo
-mimicgen
+resources/
+# robomimic
+# robosuite
+# robosuite-task-zoo
+# mimicgen
 
 uv.lock

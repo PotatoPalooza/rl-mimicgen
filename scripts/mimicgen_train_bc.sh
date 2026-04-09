@@ -17,6 +17,7 @@ Options:
   --run-root-base PATH        Base directory for per-job run roots.
   --data-dir PATH             Shared dataset directory.
   --no-download-datasets      Reuse datasets already present under DATA_DIR/core.
+  --warp                      Enable MuJoCo Warp GPU-parallel rollouts in generated training configs.
   --dry-run                   Print commands without running them.
   --help                      Show this help.
 
@@ -109,7 +110,7 @@ while [[ $# -gt 0 ]]; do
       DATA_DIR="$2"
       shift 2
       ;;
-    --no-download-datasets)
+    --no-download-datasets|--warp)
       RUNNER_FLAGS+=("$1")
       shift
       ;;

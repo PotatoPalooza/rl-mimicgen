@@ -1,6 +1,7 @@
-import torch
+import mimicgen  # noqa: F401
+import mujoco_warp as mjw
 import robosuite as suite
-import mimicgen
+import torch
 from robosuite.controllers import load_controller_config
 
 print("torch", torch.__version__)
@@ -31,6 +32,12 @@ obs, reward, done, info = env.step((low + high) / 2.0)
 assert isinstance(obs, dict)
 assert isinstance(reward, float)
 assert isinstance(info, dict)
+
+m = mjw.put_model(env.sim.model._model)
+d = mjw.put_data(env.sim.model._model, env.sim.data._data)
+
+assert m is not None
+assert d is not None
 
 print("verification", "ok", "action_dim", low.shape[0], "done", done)
 env.close()

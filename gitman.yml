@@ -1,8 +1,8 @@
-location: .
+location: resources
 
 sources:
   - name: robosuite
-    repo: https://github.com/ARISE-Initiative/robosuite
+    repo: https://github.com/Creampelt/robosuite.git
     rev: b9d8d3de5e3dfd1724f4a0e6555246c460407daa
     # (uncomment if too slow)
     # params: --depth=1 --filter=blob:none 
@@ -16,6 +16,6 @@ sources:
     rev: d0b37cf214bd24fb590d182edb6384333f67b661
 
   - name: mimicgen
-    repo: https://github.com/NVlabs/mimicgen
+    repo: https://github.com/PotatoPalooza/mimicgen
     rev: main
 

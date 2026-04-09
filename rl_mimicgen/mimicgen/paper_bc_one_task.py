@@ -18,7 +18,7 @@ from rl_mimicgen.mimicgen.runtime_checks import check_torch_cuda_compatibility
 
 WORKSPACE_DIR = Path(__file__).resolve().parents[2]
 for repo_name in ("mimicgen", "robomimic", "robosuite", "robosuite-task-zoo"):
-    repo_path = WORKSPACE_DIR / repo_name
+    repo_path = WORKSPACE_DIR / "resources" / repo_name
     if repo_path.exists():
         sys.path.insert(0, str(repo_path))
 
@@ -95,6 +95,7 @@ class Config:
     download_datasets: bool
     run_training: bool
     dry_run: bool
+    warp: bool
 
     @property
     def command_dir(self) -> Path:
@@ -204,10 +205,11 @@ class Runner:
         self.logger.info("Run root: %s", self.cfg.run_root)
         self.logger.info("Data dir: %s", self.cfg.data_dir)
         self.logger.info(
-            "DOWNLOAD_DATASETS=%s RUN_TRAINING=%s DRY_RUN=%s",
+            "DOWNLOAD_DATASETS=%s RUN_TRAINING=%s DRY_RUN=%s WARP=%s",
             int(self.cfg.download_datasets),
             int(self.cfg.run_training),
             int(self.cfg.dry_run),
+            int(self.cfg.warp),
         )
 
     def run(self) -> None:
@@ -216,7 +218,9 @@ class Runner:
             self.stage("download_released_core_datasets", self.download_released_core_datasets)
         self.stage("generate_core_training_commands", self.generate_core_training_commands)
         if self.cfg.run_training:
-            self.stage("verify_core_training_datasets", lambda: self.verify_training_inputs(self.cfg.core_train_commands))
+            self.stage(
+                "verify_core_training_datasets", lambda: self.verify_training_inputs(self.cfg.core_train_commands)
+            )
             self.stage("verify_training_environment", self.verify_training_environment)
             self.stage("run_core_training", lambda: self.run_command_file("core_train", self.cfg.core_train_commands))
 
@@ -237,9 +241,19 @@ class Runner:
                     check_overwrite=True,
                 )
 
+    def inject_warp_into_configs(self, config_paths: list[str]) -> None:
+        for config_path in config_paths:
+            path = Path(config_path)
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload.setdefault("experiment", {}).setdefault("rollout", {})["use_warp"] = True
+            path.write_text(json.dumps(payload, indent=4) + "\n", encoding="utf-8")
+            self.logger.info("Enabled use_warp in %s", config_path)
+
     def generate_core_training_commands(self) -> None:
         config_paths = self.generate_released_dataset_training_configs()
         config_paths = self.filter_training_configs(config_paths)
+        if self.cfg.warp:
+            self.inject_warp_into_configs(config_paths)
         commands = [
             shlex.join([sys.executable, "-m", "rl_mimicgen.mimicgen.train_robomimic", "--config", config_path])
             for config_path in config_paths
@@ -276,7 +290,9 @@ class Runner:
                 raise ValueError(f"Generated config missing train settings: {config_path}")
             train_cfg["output_dir"] = str(self.cfg.core_train_output_dir)
             path.write_text(json.dumps(payload, indent=4) + "\n", encoding="utf-8")
-            self.logger.info("Flattened training output dir for %s -> %s", experiment_name, self.cfg.core_train_output_dir)
+            self.logger.info(
+                "Flattened training output dir for %s -> %s", experiment_name, self.cfg.core_train_output_dir
+            )
 
     def filter_training_configs(self, config_paths: list[str]) -> list[str]:
         if self.cfg.variants is None and self.cfg.modalities is None:
@@ -351,8 +367,7 @@ class Runner:
             if len(missing) > 3:
                 preview += f", ... ({len(missing)} missing total)"
             raise FileNotFoundError(
-                "Training requested but required datasets are missing. "
-                f"Expected dataset files such as: {preview}."
+                f"Training requested but required datasets are missing. Expected dataset files such as: {preview}."
             )
 
     def write_command_file(self, path: Path, lines: list[str], label: str) -> None:
@@ -409,6 +424,12 @@ def parse_args(argv: Optional[list[str]] = None) -> Config:
     parser.add_argument("--data-dir", type=Path, default=Path(data_dir_env).resolve() if data_dir_env else None)
     add_bool_arg(parser, "run-training", env_bool("RUN_TRAINING", True), "Execute the training commands.")
     add_bool_arg(parser, "dry-run", env_bool("DRY_RUN", False), "Log stages without executing them.")
+    add_bool_arg(
+        parser,
+        "warp",
+        env_bool("WARP", False),
+        "Enable MuJoCo Warp GPU-parallel rollouts in generated training configs.",
+    )
     args = parser.parse_args(argv)
     run_root = args.run_root.resolve()
     data_dir = args.data_dir if args.data_dir is not None else run_root.parent / "datasets"
@@ -431,6 +452,7 @@ def parse_args(argv: Optional[list[str]] = None) -> Config:
         download_datasets=args.download_datasets,
         run_training=args.run_training,
         dry_run=args.dry_run,
+        warp=args.warp,
     )
 
 
