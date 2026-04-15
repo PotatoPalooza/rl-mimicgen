@@ -68,6 +68,13 @@ class RobosuiteConfig:
 
 
 @dataclass
+class DiffusionConfig:
+    enabled: bool = True
+    num_inference_timesteps: int | None = None
+    use_ema: bool = False
+
+
+@dataclass
 class OnlineRLConfig:
     checkpoint_path: str = ""
     output_dir: str = "logs/online_rl"
@@ -84,6 +91,7 @@ class OnlineRLConfig:
     residual: ResidualConfig = field(default_factory=ResidualConfig)
     evaluation: EvalConfig = field(default_factory=EvalConfig)
     robosuite: RobosuiteConfig = field(default_factory=RobosuiteConfig)
+    diffusion: DiffusionConfig = field(default_factory=DiffusionConfig)
 
     @classmethod
     def from_json(cls, path: str | Path) -> "OnlineRLConfig":
@@ -98,6 +106,7 @@ class OnlineRLConfig:
                 "residual": ResidualConfig(**data.get("residual", {})),
                 "evaluation": EvalConfig(**data.get("evaluation", {})),
                 "robosuite": RobosuiteConfig(**data.get("robosuite", {})),
+                "diffusion": DiffusionConfig(**data.get("diffusion", {})),
             }
         )
 

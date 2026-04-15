@@ -6,14 +6,14 @@ from typing import Any
 import torch
 import torch.nn as nn
 
-from rl_mimicgen.rl.policy import OnlinePolicyAdapter
-from rl_mimicgen.rl.storage import RolloutBatch
+from rl_mimicgen.rl.diffusion_policy import DiffusionOnlinePolicyAdapter
+from rl_mimicgen.rl.diffusion_storage import DiffusionRolloutBatch
 
 
-class DemoAugmentedPPO:
+class DiffusionPPO:
     def __init__(
         self,
-        policy: OnlinePolicyAdapter,
+        policy: DiffusionOnlinePolicyAdapter,
         demo_batch_iterator: Iterator[dict] | None = None,
         demo_loss_fn=None,
         demo_coef: float = 0.0,
@@ -26,7 +26,6 @@ class DemoAugmentedPPO:
         num_mini_batches: int = 4,
         clip_param: float = 0.2,
         value_loss_coef: float = 0.5,
-        entropy_coef: float = 0.0,
         max_grad_norm: float = 0.5,
         target_kl: float | None = None,
         device: torch.device | str = "cpu",
@@ -43,7 +42,6 @@ class DemoAugmentedPPO:
         self.num_mini_batches = max(1, int(num_mini_batches))
         self.clip_param = float(clip_param)
         self.value_loss_coef = float(value_loss_coef)
-        self.entropy_coef = float(entropy_coef)
         self.max_grad_norm = float(max_grad_norm)
         self.target_kl = None if target_kl is None else float(target_kl)
         self.device = torch.device(device)
@@ -92,45 +90,30 @@ class DemoAugmentedPPO:
         self.optimizer.param_groups[0]["lr"] = actor_lr
         self.optimizer.param_groups[1]["lr"] = self.critic_learning_rate
 
-    def update(self, batch: RolloutBatch) -> dict[str, float]:
-        batch = _detach_rollout_batch(batch)
+    def update(self, batch: DiffusionRolloutBatch) -> dict[str, float]:
+        batch = _detach_diffusion_batch(batch)
         self.train_mode()
         self._set_learning_rates()
 
         mean_value_loss = 0.0
         mean_surrogate_loss = 0.0
-        mean_entropy = 0.0
         mean_demo_loss = 0.0
         mean_approx_kl = 0.0
         num_updates = 0
         early_stop = False
 
+        num_decisions = batch.log_probs.shape[0]
+        num_denoising_steps = batch.log_probs.shape[1]
+        total_steps = num_decisions * num_denoising_steps
+
         for _ in range(self.num_learning_epochs):
-            env_indices = torch.randperm(batch.episode_starts.shape[1], device=self.device)
-            for batch_env_ids in torch.tensor_split(env_indices, self.num_mini_batches):
-                if batch_env_ids.numel() == 0:
+            flat_indices = torch.randperm(total_steps, device=self.device)
+            for batch_ids in torch.tensor_split(flat_indices, self.num_mini_batches):
+                if batch_ids.numel() == 0:
                     continue
-                minibatch = self._slice_batch(batch, batch_env_ids)
-
-                current_log_probs, entropy = self.policy.evaluate_actions_rollout(
-                    observations=minibatch["observations"],
-                    goals=minibatch["goals"],
-                    actions=minibatch["actions"],
-                    episode_starts=minibatch["episode_starts"],
-                    initial_rnn_state=minibatch["initial_rnn_state"],
-                )
-                current_values = self.policy.value(minibatch["observations"], goals=minibatch["goals"])
-
-                old_log_probs = minibatch["log_probs"].reshape(-1)
-                advantages = minibatch["advantages"].reshape(-1)
-                returns = minibatch["returns"].reshape(-1)
-
-                log_ratio = current_log_probs - old_log_probs
-                ratio = log_ratio.exp()
-                surrogate = -advantages * ratio
-                surrogate_clipped = -advantages * torch.clamp(ratio, 1.0 - self.clip_param, 1.0 + self.clip_param)
-                surrogate_loss = torch.max(surrogate, surrogate_clipped).mean()
-                value_loss = (returns - current_values).pow(2).mean()
+                decision_indices = torch.div(batch_ids, num_denoising_steps, rounding_mode="floor")
+                denoising_indices = torch.remainder(batch_ids, num_denoising_steps)
+                minibatch = self._slice_batch(batch, decision_indices, denoising_indices)
 
                 demo_loss = torch.zeros((), device=self.device)
                 if self.demo_batch_iterator is not None and self.demo_loss_fn is not None and self.demo_coef > 0.0:
@@ -140,28 +123,47 @@ class DemoAugmentedPPO:
                         raise RuntimeError("Demo batch iterator was exhausted unexpectedly.") from exc
                     demo_loss = self.demo_loss_fn(demo_batch)
 
-                loss = (
-                    surrogate_loss
-                    + self.value_loss_coef * value_loss
-                    - self.entropy_coef * entropy.mean()
-                    + self.demo_coef * demo_loss
-                )
-
                 self.optimizer.zero_grad(set_to_none=True)
+                current_log_probs = self.policy._chain_log_prob_subsample(
+                    obs_history=minibatch["observations"],
+                    goal_batch=minibatch["goals"],
+                    chain_samples=minibatch["chain_prev"],
+                    chain_next_samples=minibatch["chain_next"],
+                    chain_timesteps=minibatch["timesteps"],
+                )
+                current_obs = {key: value[:, -1] for key, value in minibatch["observations"].items()}
+                current_values = self.policy.value_net(current_obs, goal_dict=minibatch["goals"]).squeeze(-1)
+
+                current_log_probs = current_log_probs.mean(dim=(-1, -2))
+                old_log_probs = minibatch["log_probs"].mean(dim=(-1, -2))
+                advantages = minibatch["advantages"]
+                returns = minibatch["returns"]
+
+                log_ratio = current_log_probs - old_log_probs
+                ratio = log_ratio.exp()
+                surrogate = -advantages * ratio
+                surrogate_clipped = -advantages * torch.clamp(ratio, 1.0 - self.clip_param, 1.0 + self.clip_param)
+                surrogate_loss = torch.max(surrogate, surrogate_clipped).mean()
+                value_loss = (returns - current_values).pow(2).mean()
+                loss = surrogate_loss + self.value_loss_coef * value_loss
                 loss.backward()
+
+                if self.demo_coef > 0.0 and demo_loss.requires_grad:
+                    (self.demo_coef * demo_loss).backward()
+
                 nn.utils.clip_grad_norm_(self.policy.actor_parameters(), self.max_grad_norm)
                 nn.utils.clip_grad_norm_(self.policy.value_net.parameters(), self.max_grad_norm)
                 self.optimizer.step()
+                self.policy.step_ema()
 
-                approx_kl = (old_log_probs - current_log_probs).mean()
+                approx_kl = (old_log_probs - current_log_probs).mean().item()
                 mean_value_loss += value_loss.item()
                 mean_surrogate_loss += surrogate_loss.item()
-                mean_entropy += entropy.mean().item()
                 mean_demo_loss += demo_loss.item()
-                mean_approx_kl += approx_kl.item()
+                mean_approx_kl += approx_kl
                 num_updates += 1
 
-                if self.target_kl is not None and approx_kl.item() > 1.5 * self.target_kl:
+                if self.target_kl is not None and approx_kl > 1.5 * self.target_kl:
                     early_stop = True
                     break
             if early_stop:
@@ -172,69 +174,45 @@ class DemoAugmentedPPO:
         return {
             "value": mean_value_loss / denom,
             "surrogate": mean_surrogate_loss / denom,
-            "entropy": mean_entropy / denom,
+            "entropy": 0.0,
             "demo": mean_demo_loss / denom,
             "approx_kl": mean_approx_kl / denom,
             "early_stop": float(early_stop),
             "effective_num_minibatches": float(num_updates),
         }
 
-    def _slice_batch(self, batch: RolloutBatch, env_indices: torch.Tensor) -> dict[str, Any]:
-        env_indices_cpu = env_indices.to(device=batch.episode_starts.device)
-        initial_rnn_state = _slice_rnn_state(batch.initial_rnn_state, env_indices_cpu)
+    def _slice_batch(
+        self,
+        batch: DiffusionRolloutBatch,
+        decision_indices: torch.Tensor,
+        denoising_indices: torch.Tensor,
+    ) -> dict[str, Any]:
+        reward_horizon = self.policy.action_horizon
+        action_start = self.policy.observation_horizon - 1
+        action_end = action_start + reward_horizon
         return {
-            "observations": {key: value[:, env_indices_cpu] for key, value in batch.observations.items()},
-            "goals": None if batch.goals is None else {key: value[:, env_indices_cpu] for key, value in batch.goals.items()},
-            "actions": batch.actions[:, env_indices_cpu],
-            "log_probs": batch.log_probs.view(batch.episode_starts.shape[0], batch.episode_starts.shape[1])[:, env_indices_cpu],
-            "returns": batch.returns.view(batch.episode_starts.shape[0], batch.episode_starts.shape[1])[:, env_indices_cpu],
-            "advantages": batch.advantages.view(batch.episode_starts.shape[0], batch.episode_starts.shape[1])[:, env_indices_cpu],
-            "episode_starts": batch.episode_starts[:, env_indices_cpu].to(dtype=torch.bool),
-            "initial_rnn_state": initial_rnn_state,
+            "observations": {key: value[decision_indices] for key, value in batch.observations.items()},
+            "goals": None if batch.goals is None else {key: value[decision_indices] for key, value in batch.goals.items()},
+            "chain_prev": batch.chain_samples[decision_indices, denoising_indices, action_start:action_end],
+            "chain_next": batch.chain_next_samples[decision_indices, denoising_indices, action_start:action_end],
+            "timesteps": batch.chain_timesteps[decision_indices, denoising_indices],
+            "log_probs": batch.log_probs[decision_indices, denoising_indices],
+            "returns": batch.returns[decision_indices],
+            "advantages": batch.advantages[decision_indices],
         }
 
 
-def _slice_rnn_state(state: Any, env_indices: torch.Tensor) -> Any:
-    if state is None:
-        return None
-    if isinstance(state, dict):
-        sliced = {}
-        for key, value in state.items():
-            if key == "step_count":
-                sliced[key] = int(value)
-            else:
-                sliced[key] = _slice_rnn_state(value, env_indices)
-        return sliced
-    if isinstance(state, tuple):
-        return tuple(_slice_rnn_state(value, env_indices) for value in state)
-    if torch.is_tensor(state):
-        return state[:, env_indices].detach().clone()
-    raise TypeError(f"Unsupported recurrent state type: {type(state)!r}")
-
-
-def _detach_rollout_batch(batch: RolloutBatch) -> RolloutBatch:
-    return RolloutBatch(
+def _detach_diffusion_batch(batch: DiffusionRolloutBatch) -> DiffusionRolloutBatch:
+    return DiffusionRolloutBatch(
         observations={key: value.detach() for key, value in batch.observations.items()},
         goals=None if batch.goals is None else {key: value.detach() for key, value in batch.goals.items()},
-        actions=batch.actions.detach(),
+        chain_samples=batch.chain_samples.detach(),
+        chain_next_samples=batch.chain_next_samples.detach(),
+        chain_timesteps=batch.chain_timesteps.detach(),
         log_probs=batch.log_probs.detach(),
         returns=batch.returns.detach(),
         advantages=batch.advantages.detach(),
         values=batch.values.detach(),
         rewards=batch.rewards.detach(),
         dones=batch.dones.detach(),
-        episode_starts=batch.episode_starts.detach(),
-        initial_rnn_state=_detach_nested_state(batch.initial_rnn_state),
     )
-
-
-def _detach_nested_state(state: Any) -> Any:
-    if state is None:
-        return None
-    if isinstance(state, dict):
-        return {key: _detach_nested_state(value) for key, value in state.items()}
-    if isinstance(state, tuple):
-        return tuple(_detach_nested_state(value) for value in state)
-    if torch.is_tensor(state):
-        return state.detach()
-    return state

@@ -13,6 +13,9 @@ from torch.utils.data import DataLoader
 from robomimic.utils.train_utils import dataset_factory
 
 from rl_mimicgen.rl.config import OnlineRLConfig
+from rl_mimicgen.rl.diffusion_policy import DiffusionOnlinePolicyAdapter
+from rl_mimicgen.rl.diffusion_storage import DiffusionRolloutStorage
+from rl_mimicgen.rl.dppo import DiffusionPPO
 from rl_mimicgen.rl.policy import OnlinePolicyAdapter, load_policy_bundle
 from rl_mimicgen.rl.ppo import DemoAugmentedPPO
 from rl_mimicgen.rl.robomimic_env import ParallelRobomimicVectorEnv, SerialRobomimicVectorEnv, make_robosuite_env_from_checkpoint
@@ -30,14 +33,25 @@ class OnlineRLTrainer:
         self._seed_everything(config.seed)
 
         self.bundle = load_policy_bundle(config.checkpoint_path, self.device)
-        self.policy = OnlinePolicyAdapter(
-            bundle=self.bundle,
-            device=self.device,
-            init_log_std=config.ppo.init_log_std,
-            min_log_std=config.ppo.min_log_std,
-            residual_enabled=config.residual.enabled,
-            residual_scale=config.residual.scale,
-        )
+        self.is_diffusion_policy = getattr(self.bundle.config, "algo_name", "") == "diffusion_policy"
+        if self.is_diffusion_policy:
+            if config.residual.enabled:
+                raise ValueError("Residual fine-tuning is not supported for diffusion policies.")
+            self.policy = DiffusionOnlinePolicyAdapter(
+                bundle=self.bundle,
+                device=self.device,
+                num_inference_timesteps=config.diffusion.num_inference_timesteps,
+                use_ema=config.diffusion.use_ema,
+            )
+        else:
+            self.policy = OnlinePolicyAdapter(
+                bundle=self.bundle,
+                device=self.device,
+                init_log_std=config.ppo.init_log_std,
+                min_log_std=config.ppo.min_log_std,
+                residual_enabled=config.residual.enabled,
+                residual_scale=config.residual.scale,
+            )
 
         self.env = self._build_vector_env()
         self.eval_env = self._build_eval_env(
@@ -51,33 +65,63 @@ class OnlineRLTrainer:
             self.demo_loader = self._build_demo_loader()
             self.demo_iter = iter(self.demo_loader)
 
-        self.storage = RolloutStorage(
-            rollout_steps=self.config.rollout_steps,
-            num_envs=self.config.num_envs,
-            obs_shapes=self.policy.obs_shapes,
-            goal_shapes=self.policy.goal_shapes,
-            action_dim=int(np.prod(self.env.single_action_space.shape)),
-            device=self.device,
-        )
-        self.algorithm = DemoAugmentedPPO(
-            policy=self.policy,
-            demo_batch_iterator=self._demo_batch_generator() if self.config.demo.enabled else None,
-            demo_loss_fn=self.policy.demo_loss if self.config.demo.enabled else None,
-            demo_coef=self.config.demo.coef if self.config.demo.enabled else 0.0,
-            actor_learning_rate=self.config.optimizer.actor_lr,
-            critic_learning_rate=self.config.optimizer.value_lr,
-            weight_decay=self.config.optimizer.weight_decay,
-            critic_warmup_updates=self.config.ppo.critic_warmup_updates,
-            actor_freeze_env_steps=self.config.ppo.actor_freeze_env_steps,
-            num_learning_epochs=self.config.ppo.update_epochs,
-            num_mini_batches=self.config.ppo.num_minibatches,
-            clip_param=self.config.ppo.clip_ratio,
-            value_loss_coef=self.config.ppo.value_coef,
-            entropy_coef=self.config.ppo.entropy_coef,
-            target_kl=self.config.ppo.target_kl,
-            max_grad_norm=self.config.optimizer.max_grad_norm,
-            device=self.device,
-        )
+        if self.is_diffusion_policy:
+            self.storage = DiffusionRolloutStorage(
+                rollout_steps=self.config.rollout_steps,
+                num_envs=self.config.num_envs,
+                obs_shapes=self.policy.obs_shapes,
+                goal_shapes=self.policy.goal_shapes,
+                action_dim=int(np.prod(self.env.single_action_space.shape)),
+                prediction_horizon=self.policy.prediction_horizon,
+                chain_length=self.policy.num_inference_timesteps,
+                device=self.device,
+            )
+            self.algorithm = DiffusionPPO(
+                policy=self.policy,
+                demo_batch_iterator=self._demo_batch_generator() if self.config.demo.enabled else None,
+                demo_loss_fn=self.policy.demo_loss if self.config.demo.enabled else None,
+                demo_coef=self.config.demo.coef if self.config.demo.enabled else 0.0,
+                actor_learning_rate=self.config.optimizer.actor_lr,
+                critic_learning_rate=self.config.optimizer.value_lr,
+                weight_decay=self.config.optimizer.weight_decay,
+                critic_warmup_updates=self.config.ppo.critic_warmup_updates,
+                actor_freeze_env_steps=self.config.ppo.actor_freeze_env_steps,
+                num_learning_epochs=self.config.ppo.update_epochs,
+                num_mini_batches=self.config.ppo.num_minibatches,
+                clip_param=self.config.ppo.clip_ratio,
+                value_loss_coef=self.config.ppo.value_coef,
+                target_kl=self.config.ppo.target_kl,
+                max_grad_norm=self.config.optimizer.max_grad_norm,
+                device=self.device,
+            )
+        else:
+            self.storage = RolloutStorage(
+                rollout_steps=self.config.rollout_steps,
+                num_envs=self.config.num_envs,
+                obs_shapes=self.policy.obs_shapes,
+                goal_shapes=self.policy.goal_shapes,
+                action_dim=int(np.prod(self.env.single_action_space.shape)),
+                device=self.device,
+            )
+            self.algorithm = DemoAugmentedPPO(
+                policy=self.policy,
+                demo_batch_iterator=self._demo_batch_generator() if self.config.demo.enabled else None,
+                demo_loss_fn=self.policy.demo_loss if self.config.demo.enabled else None,
+                demo_coef=self.config.demo.coef if self.config.demo.enabled else 0.0,
+                actor_learning_rate=self.config.optimizer.actor_lr,
+                critic_learning_rate=self.config.optimizer.value_lr,
+                weight_decay=self.config.optimizer.weight_decay,
+                critic_warmup_updates=self.config.ppo.critic_warmup_updates,
+                actor_freeze_env_steps=self.config.ppo.actor_freeze_env_steps,
+                num_learning_epochs=self.config.ppo.update_epochs,
+                num_mini_batches=self.config.ppo.num_minibatches,
+                clip_param=self.config.ppo.clip_ratio,
+                value_loss_coef=self.config.ppo.value_coef,
+                entropy_coef=self.config.ppo.entropy_coef,
+                target_kl=self.config.ppo.target_kl,
+                max_grad_norm=self.config.optimizer.max_grad_norm,
+                device=self.device,
+            )
 
         self.best_success = float("-inf")
         self.last_eval_metrics: dict[str, float] | None = None
@@ -104,28 +148,58 @@ class OnlineRLTrainer:
             self.algorithm.train_mode()
             self.algorithm.demo_coef = self.current_demo_coef
             self.storage.reset()
-            self.storage.set_initial_rnn_state(self.policy.clone_training_rollout_state())
+            if not self.is_diffusion_policy:
+                self.storage.set_initial_rnn_state(self.policy.clone_training_rollout_state())
 
-            for _ in range(self.config.rollout_steps):
-                env_actions, policy_actions, log_probs, values = self.policy.act(
-                    obs=obs,
-                    goal=goal,
-                    episode_starts=episode_starts,
-                    clip_actions=self.config.ppo.clip_actions,
-                )
+            rollout_env_steps = 0
+            while rollout_env_steps < self.config.rollout_steps:
+                if self.is_diffusion_policy:
+                    env_actions, replan_data, completed_envs = self.policy.act(
+                        obs=obs,
+                        goal=goal,
+                        episode_starts=episode_starts,
+                        clip_actions=self.config.ppo.clip_actions,
+                    )
+                    if replan_data is not None:
+                        self.storage.start_decisions(
+                            env_indices=replan_data["env_indices"],
+                            obs_history=replan_data["obs_history"],
+                            goals=replan_data["goals"],
+                            chain_samples=replan_data["chain_samples"],
+                            chain_next_samples=replan_data["chain_next_samples"],
+                            chain_timesteps=replan_data["chain_timesteps"],
+                            log_probs=replan_data["log_probs"],
+                            values=replan_data["values"],
+                        )
+                else:
+                    env_actions, policy_actions, log_probs, values = self.policy.act(
+                        obs=obs,
+                        goal=goal,
+                        episode_starts=episode_starts,
+                        clip_actions=self.config.ppo.clip_actions,
+                    )
                 next_obs, rewards, terminated, truncated, infos = self.env.step(env_actions)
                 done = terminated | truncated
 
-                self.storage.add(
-                    obs=obs,
-                    actions=policy_actions,
-                    goals=goal,
-                    log_probs=log_probs,
-                    rewards=rewards,
-                    dones=done.astype(np.float32),
-                    episode_starts=episode_starts.astype(np.float32),
-                    values=values,
-                )
+                if self.is_diffusion_policy:
+                    self.storage.accumulate_step(
+                        rewards=rewards,
+                        dones=done.astype(np.float32),
+                    )
+                    finalize_envs = np.union1d(completed_envs, np.nonzero(done)[0].astype(np.int64))
+                    if finalize_envs.size:
+                        self.storage.finalize_decisions(finalize_envs)
+                else:
+                    self.storage.add(
+                        obs=obs,
+                        actions=policy_actions,
+                        goals=goal,
+                        log_probs=log_probs,
+                        rewards=rewards,
+                        dones=done.astype(np.float32),
+                        episode_starts=episode_starts.astype(np.float32),
+                        values=values,
+                    )
 
                 running_returns += rewards
                 running_lengths += 1
@@ -143,8 +217,9 @@ class OnlineRLTrainer:
                 obs = next_obs
                 goal = self._current_goal(self.env)
                 episode_starts = done
+                rollout_env_steps += self.config.num_envs
 
-            total_env_steps += self.config.rollout_steps * self.config.num_envs
+            total_env_steps += rollout_env_steps
             self.algorithm.set_total_env_steps(total_env_steps)
             last_values = self.policy.predict_value(obs=obs, goal=goal)
             self.storage.compute_returns_and_advantages(

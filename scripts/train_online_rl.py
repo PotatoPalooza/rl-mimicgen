@@ -4,7 +4,7 @@ from rl_mimicgen.rl import OnlineRLConfig, OnlineRLTrainer
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Online PPO fine-tuning for robomimic BC checkpoints.")
+    parser = argparse.ArgumentParser(description="Online PPO / DPPO fine-tuning for robomimic checkpoints.")
     parser.add_argument("--config", type=str, default=None, help="Path to a JSON config file.")
     parser.add_argument("--checkpoint", type=str, default=None, help="Path to a robomimic checkpoint.")
     parser.add_argument("--output_dir", type=str, default=None, help="Directory to write logs and checkpoints.")
@@ -35,6 +35,8 @@ def main() -> None:
     parser.add_argument("--eval_num_envs", type=int, default=None, help="Number of parallel environments to use during evaluation.")
     parser.add_argument("--demo_coef", type=float, default=None, help="Initial demo BC loss weight.")
     parser.add_argument("--demo_decay", type=float, default=None, help="Per-update decay applied to demo BC loss.")
+    parser.add_argument("--diffusion_num_inference_timesteps", type=int, default=None, help="Override the number of DDPM denoising steps used during diffusion-policy online RL.")
+    parser.add_argument("--diffusion_use_ema", action="store_true", help="Use the diffusion checkpoint EMA weights for deterministic evaluation. PPO training rollouts always use the live actor weights.")
     parser.add_argument("--residual", action="store_true", help="Enable residual policy fine-tuning on top of the BC checkpoint.")
     parser.add_argument("--residual_scale", type=float, default=None, help="Scale factor applied to residual actions before adding to the frozen BC action.")
     args = parser.parse_args()
@@ -68,6 +70,10 @@ def main() -> None:
         config.demo.coef = args.demo_coef
     if args.demo_decay is not None:
         config.demo.decay = args.demo_decay
+    if args.diffusion_num_inference_timesteps is not None:
+        config.diffusion.num_inference_timesteps = args.diffusion_num_inference_timesteps
+    if args.diffusion_use_ema:
+        config.diffusion.use_ema = True
     if args.residual:
         config.residual.enabled = True
     if args.residual_scale is not None:
