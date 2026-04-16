@@ -57,5 +57,9 @@
     "height": 512,
     "fps": 20,
     "camera": null
+  },
+  "env_kwargs": {
+    "extra_randomization": true,
+    "tipover_prob": 0.0
   }
 }

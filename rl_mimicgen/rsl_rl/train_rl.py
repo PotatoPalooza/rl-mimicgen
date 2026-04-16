@@ -6,11 +6,11 @@ backbone is transferred; the Gaussian head and critic are learned from scratch.
 
 Usage (local BC checkpoint)::
 
-    python scripts/train_rl.py --bc_checkpoint runs/coffee_d0_low_dim/.../models/model_450.pth
+    python -m rl_mimicgen.rsl_rl.train_rl --bc_checkpoint runs/coffee_d0_low_dim/.../models/model_450.pth
 
 Usage (wandb source)::
 
-    python scripts/train_rl.py \
+    python -m rl_mimicgen.rsl_rl.train_rl \
         --wandb_run user/proj/abc123 --wandb_model model_450.pth
 """
 
@@ -20,15 +20,16 @@ import os
 import re
 import sys
 from datetime import datetime
+from pathlib import Path
 from typing import Callable, Optional
 
 import numpy as np
 import torch
 
 # Add robomimic / robosuite / mimicgen to path
-_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 for _sub in ("robomimic", "robosuite", "mimicgen"):
-    sys.path.insert(0, os.path.join(_REPO_ROOT, "resources", _sub))
+    sys.path.insert(0, str(_REPO_ROOT / "resources" / _sub))
 
 import robomimic.utils.env_utils as EnvUtils
 import robomimic.utils.obs_utils as ObsUtils
@@ -131,11 +132,17 @@ def parse_args():
 
     # -- Video logging --
     parser.add_argument("--video", action=argparse.BooleanOptionalAction, default=None,
-                        help="Log an eval-rollout video of env 0 at each save_interval "
-                             "(including iter 0). Enables offscreen rendering on the warp env. "
-                             "If unset, uses ppo_cfg.json / dapg_cfg.json's video.enabled (default "
-                             "true). Pass --no-video to disable. Framing "
-                             "(width/height/fps/camera) lives in the 'video' config block.")
+                        help="Log an eval-rollout video of env 0 at (approximately) each "
+                             "video_interval env-steps, beginning at the start of the first "
+                             "episode on/after that boundary. Enables offscreen rendering on "
+                             "the warp env. If unset, uses ppo_cfg.json / dapg_cfg.json's "
+                             "video.enabled (default true). Pass --no-video to disable. "
+                             "Framing (width/height/fps/camera) lives in the 'video' config block.")
+    parser.add_argument("--video_interval", type=int, default=None,
+                        help="Minimum env-steps between recorded clips. Recording is armed once "
+                             "the interval elapses, and capture starts at the next env-0 episode "
+                             "boundary. Defaults to video.interval in the config, or "
+                             "num_steps_per_env * save_interval if neither is set.")
 
     return parser.parse_args()
 
@@ -296,9 +303,16 @@ def main():
     video_enabled = args.video if args.video is not None else bool(video_cfg.get("enabled", True))
 
     device = torch.device(args.device)
-    print(f"[INFO] Creating warp env (num_envs={args.num_envs}, horizon={args.horizon})")
+    env_meta = bc_info.env_meta
+    # Config-driven env kwargs (e.g. extra_randomization, tipover_prob). Only coffee-family
+    # envs accept them; other robosuite envs would reject unknown kwargs.
+    cfg_env_kwargs: dict = train_cfg.get("env_kwargs", {}) or {}
+    if cfg_env_kwargs and "coffee" in str(env_meta.get("env_name", "")).lower():
+        env_meta.setdefault("env_kwargs", {}).update(cfg_env_kwargs)
+    print(f"[INFO] Creating warp env (num_envs={args.num_envs}, horizon={args.horizon}, "
+          f"env_kwargs={cfg_env_kwargs})")
     env = EnvUtils.create_env_from_metadata(
-        env_meta=bc_info.env_meta,
+        env_meta=env_meta,
         render=False,
         render_offscreen=video_enabled,
         use_image_obs=False,
@@ -308,11 +322,16 @@ def main():
 
     video_trigger: Optional[Callable[[int], bool]] = None
     if video_enabled:
-        video_period = max(1, train_cfg["num_steps_per_env"] * train_cfg["save_interval"])
-        video_trigger = lambda s: s % video_period == 0  # noqa: E731
-        print(f"[INFO] Video: recording env 0 every {video_period} env steps "
-              f"(save_interval={train_cfg['save_interval']} iters x "
-              f"{train_cfg['num_steps_per_env']} steps/env)")
+        if args.video_interval is not None:
+            video_interval = args.video_interval
+        elif video_cfg.get("interval") is not None:
+            video_interval = int(video_cfg["interval"])
+        else:
+            video_interval = train_cfg["num_steps_per_env"] * train_cfg["save_interval"]
+        video_interval = max(1, video_interval)
+        video_trigger = lambda s: s % video_interval == 0  # noqa: E731
+        print(f"[INFO] Video: arming every {video_interval} env steps; "
+              f"each clip starts at the next env-0 episode boundary")
 
     vec_env = RobomimicVecEnv(
         env=env,
