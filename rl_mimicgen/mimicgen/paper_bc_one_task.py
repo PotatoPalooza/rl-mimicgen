@@ -73,8 +73,11 @@ def env_bool(name: str, default: bool) -> bool:
     return value.lower() not in {"0", "false", "no"}
 
 
+SCRIPT_NAME = "paper_bc_one_task"
+
+
 def now_stamp() -> str:
-    return datetime.now().strftime("%Y%m%d_%H%M%S")
+    return datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
 
 def add_bool_arg(parser: argparse.ArgumentParser, name: str, default: bool, help_text: str) -> None:
@@ -90,20 +93,32 @@ class Config:
     variants: Optional[list[str]]
     modalities: Optional[list[str]]
     workspace_dir: Path
-    run_root: Path
+    run_root: Path          # shared output root, e.g. <workspace>/runs
+    stamp: str              # timestamp slug that scopes this invocation's metadata
     data_dir: Path
     download_datasets: bool
     run_training: bool
     dry_run: bool
     warp: bool
+    logger: str
+    wandb_project: Optional[str]
+    wandb_run: Optional[str]
+    wandb_model: Optional[str]
+
+    # Pipeline bookkeeping lives under runs/logs/<script>/<stamp>/; training
+    # output goes directly under run_root (robomimic's get_exp_dir adds the
+    # <experiment.name>/<timestamp> hierarchy beneath).
+    @property
+    def meta_dir(self) -> Path:
+        return self.run_root / "logs" / SCRIPT_NAME / self.stamp
 
     @property
     def command_dir(self) -> Path:
-        return self.run_root / "commands"
+        return self.meta_dir / "commands"
 
     @property
     def log_dir(self) -> Path:
-        return self.run_root / "logs"
+        return self.meta_dir / "logs"
 
     @property
     def log_file(self) -> Path:
@@ -119,11 +134,11 @@ class Config:
 
     @property
     def core_train_config_dir(self) -> Path:
-        return self.run_root / "core_train_configs"
+        return self.meta_dir / "configs"
 
     @property
     def core_train_output_dir(self) -> Path:
-        return self.run_root / "core_training_results"
+        return self.run_root
 
     @property
     def core_train_commands(self) -> Path:
@@ -203,13 +218,15 @@ class Runner:
         self.logger.info("Modalities: %s", ",".join(self.cfg.modalities) if self.cfg.modalities else "all")
         self.logger.info("Workspace dir: %s", self.cfg.workspace_dir)
         self.logger.info("Run root: %s", self.cfg.run_root)
+        self.logger.info("Meta dir: %s", self.cfg.meta_dir)
         self.logger.info("Data dir: %s", self.cfg.data_dir)
         self.logger.info(
-            "DOWNLOAD_DATASETS=%s RUN_TRAINING=%s DRY_RUN=%s WARP=%s",
+            "DOWNLOAD_DATASETS=%s RUN_TRAINING=%s DRY_RUN=%s WARP=%s LOGGER=%s",
             int(self.cfg.download_datasets),
             int(self.cfg.run_training),
             int(self.cfg.dry_run),
             int(self.cfg.warp),
+            self.cfg.logger,
         )
 
     def run(self) -> None:
@@ -249,13 +266,55 @@ class Runner:
             path.write_text(json.dumps(payload, indent=4) + "\n", encoding="utf-8")
             self.logger.info("Enabled use_warp in %s", config_path)
 
+    def inject_wandb_into_configs(self, config_paths: list[str]) -> None:
+        """Enable wandb logging in each generated training config.
+
+        Defaults wandb_proj_name to ``<task>_<modality>`` (e.g. ``coffee_low_dim``)
+        and wandb_group to the dataset variant (``d0``/``d1``/...), both derived
+        from the generated config payload. ``--wandb-project`` overrides the
+        project name.
+        """
+        for config_path in config_paths:
+            path = Path(config_path)
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            modality = self.modality_from_payload(payload) or "low_dim"
+            variant = self.variant_from_payload(payload)
+            project = self.cfg.wandb_project or f"{self.cfg.task}_{modality}"
+            group = variant.lower() if variant else None
+
+            logging_cfg = payload.setdefault("experiment", {}).setdefault("logging", {})
+            logging_cfg["log_wandb"] = True
+            logging_cfg["wandb_proj_name"] = project
+            logging_cfg["wandb_group"] = group
+
+            path.write_text(json.dumps(payload, indent=4) + "\n", encoding="utf-8")
+            self.logger.info(
+                "Enabled wandb in %s (project=%s group=%s)", config_path, project, group,
+            )
+
     def generate_core_training_commands(self) -> None:
         config_paths = self.generate_released_dataset_training_configs()
         config_paths = self.filter_training_configs(config_paths)
         if self.cfg.warp:
             self.inject_warp_into_configs(config_paths)
+        if self.cfg.logger == "wandb":
+            self.inject_wandb_into_configs(config_paths)
+        if self.cfg.wandb_run is not None and len(config_paths) > 1:
+            raise SystemExit(
+                "--wandb_run identifies a single source run, but --variant/--modality selected "
+                f"{len(config_paths)} configs. Narrow the selection down to one "
+                "(e.g. --variant D0 --modality low_dim) before resuming from wandb."
+            )
+        extra_args: list[str] = []
+        if self.cfg.wandb_run is not None:
+            if self.cfg.wandb_model is None:
+                raise SystemExit("--wandb_run requires --wandb_model (e.g. model_50.pth)")
+            extra_args = ["--wandb_run", self.cfg.wandb_run, "--wandb_model", self.cfg.wandb_model]
         commands = [
-            shlex.join([sys.executable, "-m", "rl_mimicgen.mimicgen.train_robomimic", "--config", config_path])
+            shlex.join(
+                [sys.executable, "-m", "rl_mimicgen.mimicgen.train_robomimic", "--config", config_path]
+                + extra_args
+            )
             for config_path in config_paths
         ]
         self.write_command_file(self.cfg.core_train_commands, commands, "core training")
@@ -288,10 +347,20 @@ class Runner:
             train_cfg = payload.get("train")
             if not isinstance(train_cfg, dict):
                 raise ValueError(f"Generated config missing train settings: {config_path}")
+            # strip the generator's dataset-type prefix so experiment.name becomes
+            # <task>_<variant>_<modality> (e.g. coffee_d0_low_dim); robomimic's
+            # get_exp_dir will then produce runs/<experiment.name>/<timestamp>/...
+            new_name = experiment_name
+            for prefix in ("core_", "source_"):
+                if new_name.startswith(prefix):
+                    new_name = new_name[len(prefix):]
+                    break
+            payload["experiment"]["name"] = new_name
             train_cfg["output_dir"] = str(self.cfg.core_train_output_dir)
             path.write_text(json.dumps(payload, indent=4) + "\n", encoding="utf-8")
             self.logger.info(
-                "Flattened training output dir for %s -> %s", experiment_name, self.cfg.core_train_output_dir
+                "Set training output dir for %s -> %s/%s/<stamp>/",
+                experiment_name, self.cfg.core_train_output_dir, new_name,
             )
 
     def filter_training_configs(self, config_paths: list[str]) -> list[str]:
@@ -397,7 +466,8 @@ class Runner:
 def parse_args(argv: Optional[list[str]] = None) -> Config:
     workspace_dir = WORKSPACE_DIR
     task_choices = sorted(RELEASED_CORE_TASKS)
-    default_run_root = workspace_dir / "runs" / os.environ.get("RUN_NAME", f"paper_bc_one_task_{now_stamp()}")
+    default_run_root = workspace_dir / "runs"
+    default_stamp = os.environ.get("RUN_STAMP", now_stamp())
     data_dir_env = os.environ.get("DATA_DIR")
     parser = argparse.ArgumentParser(description="Train BC for one task from released MimicGen core datasets.")
     parser.add_argument("--task", required=True, choices=task_choices, help="Paper task to train.")
@@ -421,6 +491,8 @@ def parse_args(argv: Optional[list[str]] = None) -> Config:
         "Download released MimicGen core datasets for this task if they are missing.",
     )
     parser.add_argument("--run-root", type=Path, default=Path(os.environ.get("RUN_ROOT", str(default_run_root))))
+    parser.add_argument("--stamp", default=default_stamp,
+                        help="Timestamp slug for this invocation's metadata dir (default: now).")
     parser.add_argument("--data-dir", type=Path, default=Path(data_dir_env).resolve() if data_dir_env else None)
     add_bool_arg(parser, "run-training", env_bool("RUN_TRAINING", True), "Execute the training commands.")
     add_bool_arg(parser, "dry-run", env_bool("DRY_RUN", False), "Log stages without executing them.")
@@ -430,9 +502,32 @@ def parse_args(argv: Optional[list[str]] = None) -> Config:
         env_bool("WARP", False),
         "Enable MuJoCo Warp GPU-parallel rollouts in generated training configs.",
     )
+    parser.add_argument(
+        "--logger",
+        choices=("tensorboard", "wandb"),
+        default=os.environ.get("LOGGER", "tensorboard"),
+        help="Experiment logger. 'wandb' enables wandb in generated training configs.",
+    )
+    parser.add_argument(
+        "--wandb-project",
+        default=os.environ.get("WANDB_PROJECT"),
+        help="Override wandb project name (default: <task>_<modality>, e.g. coffee_low_dim).",
+    )
+    parser.add_argument(
+        "--wandb_run",
+        default=os.environ.get("WANDB_RUN"),
+        help="Resume training from a checkpoint logged by this wandb run "
+             "(format: entity/project/run_id). Requires --wandb_model and a single-config selection "
+             "(narrow via --variant/--modality).",
+    )
+    parser.add_argument(
+        "--wandb_model",
+        default=os.environ.get("WANDB_MODEL"),
+        help="Checkpoint filename within --wandb_run to fetch (e.g. model_50.pth).",
+    )
     args = parser.parse_args(argv)
     run_root = args.run_root.resolve()
-    data_dir = args.data_dir if args.data_dir is not None else run_root.parent / "datasets"
+    data_dir = args.data_dir if args.data_dir is not None else run_root / "datasets"
     variants = sorted({value.upper() for value in args.variants}) if args.variants else None
     modalities = sorted(set(args.modalities)) if args.modalities else None
     if variants is not None:
@@ -448,11 +543,16 @@ def parse_args(argv: Optional[list[str]] = None) -> Config:
         modalities=modalities,
         workspace_dir=workspace_dir,
         run_root=run_root,
+        stamp=args.stamp,
         data_dir=data_dir.resolve(),
         download_datasets=args.download_datasets,
         run_training=args.run_training,
         dry_run=args.dry_run,
         warp=args.warp,
+        logger=args.logger,
+        wandb_project=args.wandb_project,
+        wandb_run=args.wandb_run,
+        wandb_model=args.wandb_model,
     )
 
 

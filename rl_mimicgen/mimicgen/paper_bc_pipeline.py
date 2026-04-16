@@ -6,6 +6,7 @@ import importlib.util
 import json
 import logging
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -74,8 +75,11 @@ def env_bool(name: str, default: bool) -> bool:
     return value.lower() not in {"0", "false", "no"}
 
 
+SCRIPT_NAME = "paper_bc_pipeline"
+
+
 def now_stamp() -> str:
-    return datetime.now().strftime("%Y%m%d_%H%M%S")
+    return datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
 
 def add_bool_arg(parser: argparse.ArgumentParser, name: str, default: bool, help_text: str) -> None:
@@ -88,7 +92,8 @@ def add_bool_arg(parser: argparse.ArgumentParser, name: str, default: bool, help
 @dataclass
 class Config:
     workspace_dir: Path
-    run_root: Path
+    run_root: Path          # shared output root, e.g. <workspace>/runs
+    stamp: str              # timestamp slug that scopes this invocation's metadata
     data_dir: Path
     num_traj: int
     guarantee: bool
@@ -101,14 +106,24 @@ class Config:
     tasks: Optional[list[str]]
     dry_run: bool
     warp: bool
+    logger: str
+    wandb_project: Optional[str]
+
+    # Pipeline bookkeeping (configs, generated datasets, commands, stdout logs)
+    # lives under runs/logs/<script>/<stamp>/; actual training output goes
+    # directly under run_root (robomimic's get_exp_dir adds the
+    # <experiment.name>/<timestamp> hierarchy beneath).
+    @property
+    def meta_dir(self) -> Path:
+        return self.run_root / "logs" / SCRIPT_NAME / self.stamp
 
     @property
     def command_dir(self) -> Path:
-        return self.run_root / "commands"
+        return self.meta_dir / "commands"
 
     @property
     def log_dir(self) -> Path:
-        return self.run_root / "logs"
+        return self.meta_dir / "logs"
 
     @property
     def log_file(self) -> Path:
@@ -116,35 +131,35 @@ class Config:
 
     @property
     def core_config_dir(self) -> Path:
-        return self.run_root / "core_configs"
+        return self.meta_dir / "core_configs"
 
     @property
     def core_dataset_dir(self) -> Path:
-        return self.run_root / "core_datasets"
+        return self.meta_dir / "core_datasets"
 
     @property
     def core_train_config_dir(self) -> Path:
-        return self.run_root / "core_train_configs"
+        return self.meta_dir / "core_train_configs"
 
     @property
     def core_train_output_dir(self) -> Path:
-        return self.run_root / "core_training_results"
+        return self.run_root
 
     @property
     def robot_config_dir(self) -> Path:
-        return self.run_root / "robot_configs"
+        return self.meta_dir / "robot_configs"
 
     @property
     def robot_dataset_dir(self) -> Path:
-        return self.run_root / "robot_datasets"
+        return self.meta_dir / "robot_datasets"
 
     @property
     def robot_train_config_dir(self) -> Path:
-        return self.run_root / "robot_train_configs"
+        return self.meta_dir / "robot_train_configs"
 
     @property
     def robot_train_output_dir(self) -> Path:
-        return self.run_root / "robot_training_results"
+        return self.run_root
 
     @property
     def core_dataset_commands(self) -> Path:
@@ -210,10 +225,11 @@ class Runner:
     def log_config(self) -> None:
         self.logger.info("Workspace dir: %s", self.cfg.workspace_dir)
         self.logger.info("Run root: %s", self.cfg.run_root)
+        self.logger.info("Meta dir: %s", self.cfg.meta_dir)
         self.logger.info("Data dir: %s", self.cfg.data_dir)
         self.logger.info("Tasks: %s", ",".join(self.cfg.tasks) if self.cfg.tasks else "all")
         self.logger.info(
-            "NUM_TRAJ=%s GUARANTEE=%s RUN_GENERATION=%s RUN_TRAINING=%s TRAINING_DATA=%s ROBOT_TRANSFER=%s DRY_RUN=%s WARP=%s",
+            "NUM_TRAJ=%s GUARANTEE=%s RUN_GENERATION=%s RUN_TRAINING=%s TRAINING_DATA=%s ROBOT_TRANSFER=%s DRY_RUN=%s WARP=%s LOGGER=%s",
             self.cfg.num_traj,
             int(self.cfg.guarantee),
             int(self.cfg.run_generation),
@@ -222,6 +238,7 @@ class Runner:
             int(self.cfg.include_robot_transfer),
             int(self.cfg.dry_run),
             int(self.cfg.warp),
+            self.cfg.logger,
         )
 
     def ensure_optional_dependencies(self) -> None:
@@ -444,6 +461,92 @@ class Runner:
             path.write_text(json.dumps(payload, indent=4) + "\n", encoding="utf-8")
             self.logger.info("Enabled use_warp in %s", config_path)
 
+    def rewrite_training_output_dirs(self, config_paths: list[str]) -> None:
+        """Point every generated config at run_root and normalize experiment.name.
+
+        Strips the dataset-type prefix so experiment.name becomes
+        ``<task>_<variant>_<modality>`` (e.g. ``coffee_d0_low_dim``);
+        robomimic's get_exp_dir will produce runs/<experiment.name>/<timestamp>/...
+        """
+        for config_path in config_paths:
+            path = Path(config_path)
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            experiment_name = payload.get("experiment", {}).get("name")
+            if not isinstance(experiment_name, str) or not experiment_name:
+                raise ValueError(f"Generated config missing experiment.name: {config_path}")
+            train_cfg = payload.get("train")
+            if not isinstance(train_cfg, dict):
+                raise ValueError(f"Generated config missing train settings: {config_path}")
+            new_name = experiment_name
+            for prefix in ("core_", "source_", "robot_"):
+                if new_name.startswith(prefix):
+                    new_name = new_name[len(prefix):]
+                    break
+            payload["experiment"]["name"] = new_name
+            train_cfg["output_dir"] = str(self.cfg.run_root)
+            path.write_text(json.dumps(payload, indent=4) + "\n", encoding="utf-8")
+            self.logger.info(
+                "Set training output dir for %s -> %s/%s/<stamp>/",
+                experiment_name, self.cfg.run_root, new_name,
+            )
+
+    def _modality_from_payload(self, payload: dict) -> str:
+        experiment_name = payload.get("experiment", {}).get("name")
+        if isinstance(experiment_name, str):
+            if experiment_name.endswith("_low_dim"):
+                return "low_dim"
+            if experiment_name.endswith("_image"):
+                return "image"
+        obs = payload.get("observation", {}).get("modalities", {}).get("obs", {})
+        if isinstance(obs, dict):
+            rgb = obs.get("rgb")
+            if isinstance(rgb, list) and rgb:
+                return "image"
+        return "low_dim"
+
+    def _variant_from_payload(self, payload: dict) -> Optional[str]:
+        dataset_path = payload.get("train", {}).get("data")
+        if not isinstance(dataset_path, str):
+            return None
+        match = re.search(r"_(d\d|o\d)(?:[^a-z0-9]|$)", dataset_path.lower())
+        if match is None:
+            return None
+        return match.group(1).upper()
+
+    def inject_wandb_into_configs(self, config_paths: list[str]) -> None:
+        """Enable wandb logging in each generated training config.
+
+        Derives project as ``<task>_<modality>`` (e.g. ``coffee_low_dim``) and
+        group as the dataset variant (``d0``/``d1``/...) from the payload.
+        ``--wandb-project`` overrides the project name for all configs.
+        """
+        for config_path in config_paths:
+            path = Path(config_path)
+            payload = json.loads(path.read_text(encoding="utf-8"))
+
+            modality = self._modality_from_payload(payload)
+            variant = self._variant_from_payload(payload)
+            train_data = payload.get("train", {}).get("data")
+            task = self.task_for_path(train_data) if isinstance(train_data, str) else None
+
+            if self.cfg.wandb_project is not None:
+                project = self.cfg.wandb_project
+            elif task is not None:
+                project = f"{task}_{modality}"
+            else:
+                project = f"mimicgen_{modality}"
+            group = variant.lower() if variant else None
+
+            logging_cfg = payload.setdefault("experiment", {}).setdefault("logging", {})
+            logging_cfg["log_wandb"] = True
+            logging_cfg["wandb_proj_name"] = project
+            logging_cfg["wandb_group"] = group
+
+            path.write_text(json.dumps(payload, indent=4) + "\n", encoding="utf-8")
+            self.logger.info(
+                "Enabled wandb in %s (project=%s group=%s)", config_path, project, group,
+            )
+
     def _config_paths_from_lines(self, lines: list[str]) -> list[str]:
         """Extract --config paths from a list of command strings."""
         import shlex as _shlex
@@ -467,8 +570,12 @@ class Runner:
         )
         _, lines = config_generator_to_script_lines(generators, config_dir=str(self.cfg.core_train_config_dir))
         lines = self.filter_command_lines(self.training_command_lines(lines), "core training")
+        config_paths = self._config_paths_from_lines(lines)
+        self.rewrite_training_output_dirs(config_paths)
         if self.cfg.warp:
-            self.inject_warp_into_configs(self._config_paths_from_lines(lines))
+            self.inject_warp_into_configs(config_paths)
+        if self.cfg.logger == "wandb":
+            self.inject_wandb_into_configs(config_paths)
         self.write_command_file(self.cfg.core_train_commands, lines, "core training")
 
     def generate_source_training_commands(self) -> None:
@@ -487,6 +594,11 @@ class Runner:
                     obs_modality=obs_modality,
                 )
                 config_paths.append(config_path)
+        self.rewrite_training_output_dirs(config_paths)
+        if self.cfg.warp:
+            self.inject_warp_into_configs(config_paths)
+        if self.cfg.logger == "wandb":
+            self.inject_wandb_into_configs(config_paths)
         lines = [
             shlex.join([sys.executable, "-m", "rl_mimicgen.mimicgen.train_robomimic", "--config", config_path])
             for config_path in config_paths
@@ -503,8 +615,12 @@ class Runner:
         )
         _, lines = config_generator_to_script_lines(generators, config_dir=str(self.cfg.robot_train_config_dir))
         lines = self.filter_command_lines(self.training_command_lines(lines), "robot training")
+        config_paths = self._config_paths_from_lines(lines)
+        self.rewrite_training_output_dirs(config_paths)
         if self.cfg.warp:
-            self.inject_warp_into_configs(self._config_paths_from_lines(lines))
+            self.inject_warp_into_configs(config_paths)
+        if self.cfg.logger == "wandb":
+            self.inject_wandb_into_configs(config_paths)
         self.write_command_file(self.cfg.robot_train_commands, lines, "robot training")
 
     def run_command_file(self, label: str, path: Path) -> None:
@@ -563,9 +679,12 @@ class Runner:
 
 def parse_args(argv: Optional[list[str]] = None) -> Config:
     workspace_dir = WORKSPACE_DIR
-    default_run_root = workspace_dir / "runs" / os.environ.get("RUN_NAME", f"paper_bc_{now_stamp()}")
+    default_run_root = workspace_dir / "runs"
+    default_stamp = os.environ.get("RUN_STAMP", now_stamp())
     parser = argparse.ArgumentParser(description="Run a simplified MimicGen paper BC pipeline.")
     parser.add_argument("--run-root", type=Path, default=Path(os.environ.get("RUN_ROOT", str(default_run_root))))
+    parser.add_argument("--stamp", default=default_stamp,
+                        help="Timestamp slug for this invocation's metadata dir (default: now).")
     parser.add_argument("--data-dir", type=Path, default=Path(os.environ.get("DATA_DIR", str(workspace_dir / "datasets"))))
     parser.add_argument("--num-traj", type=int, default=int(os.environ.get("NUM_TRAJ", "1000")))
     parser.add_argument(
@@ -589,11 +708,23 @@ def parse_args(argv: Optional[list[str]] = None) -> Config:
     add_bool_arg(parser, "include-robot-transfer", env_bool("INCLUDE_ROBOT_TRANSFER", False), "Include robot-transfer generation and training stages.")
     add_bool_arg(parser, "dry-run", env_bool("DRY_RUN", False), "Log stages without executing them.")
     add_bool_arg(parser, "warp", env_bool("WARP", False), "Enable MuJoCo Warp GPU-parallel rollouts in generated training configs.")
+    parser.add_argument(
+        "--logger",
+        choices=("tensorboard", "wandb"),
+        default=os.environ.get("LOGGER", "tensorboard"),
+        help="Experiment logger. 'wandb' enables wandb in generated training configs.",
+    )
+    parser.add_argument(
+        "--wandb-project",
+        default=os.environ.get("WANDB_PROJECT"),
+        help="Override wandb project name (default: <task>_<modality>, e.g. coffee_low_dim).",
+    )
     args = parser.parse_args(argv)
     tasks = sorted(set(args.tasks)) if args.tasks else None
     return Config(
         workspace_dir=workspace_dir,
         run_root=args.run_root.resolve(),
+        stamp=args.stamp,
         data_dir=args.data_dir.resolve(),
         num_traj=args.num_traj,
         guarantee=args.guarantee,
@@ -606,6 +737,8 @@ def parse_args(argv: Optional[list[str]] = None) -> Config:
         tasks=tasks,
         dry_run=args.dry_run,
         warp=args.warp,
+        logger=args.logger,
+        wandb_project=args.wandb_project,
     )
 
 
