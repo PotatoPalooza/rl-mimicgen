@@ -104,6 +104,7 @@ class Config:
     wandb_project: Optional[str]
     wandb_run: Optional[str]
     wandb_model: Optional[str]
+    resume: bool
 
     # Pipeline bookkeeping lives under runs/logs/<script>/<stamp>/; training
     # output goes directly under run_root (robomimic's get_exp_dir adds the
@@ -305,11 +306,15 @@ class Runner:
                 f"{len(config_paths)} configs. Narrow the selection down to one "
                 "(e.g. --variant D0 --modality low_dim) before resuming from wandb."
             )
+        if self.cfg.resume and self.cfg.wandb_run is not None:
+            raise SystemExit("--resume and --wandb_run are mutually exclusive.")
         extra_args: list[str] = []
         if self.cfg.wandb_run is not None:
             if self.cfg.wandb_model is None:
                 raise SystemExit("--wandb_run requires --wandb_model (e.g. model_50.pth)")
             extra_args = ["--wandb_run", self.cfg.wandb_run, "--wandb_model", self.cfg.wandb_model]
+        if self.cfg.resume:
+            extra_args.append("--resume")
         commands = [
             shlex.join(
                 [sys.executable, "-m", "rl_mimicgen.mimicgen.train_robomimic", "--config", config_path]
@@ -525,6 +530,13 @@ def parse_args(argv: Optional[list[str]] = None) -> Config:
         default=os.environ.get("WANDB_MODEL"),
         help="Checkpoint filename within --wandb_run to fetch (e.g. model_50.pth).",
     )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        default=env_bool("RESUME", False),
+        help="Resume core training from the latest checkpoint under the selected "
+             "experiment dir (delegates to robomimic train.py's --resume).",
+    )
     args = parser.parse_args(argv)
     run_root = args.run_root.resolve()
     data_dir = args.data_dir if args.data_dir is not None else run_root / "datasets"
@@ -553,6 +565,7 @@ def parse_args(argv: Optional[list[str]] = None) -> Config:
         wandb_project=args.wandb_project,
         wandb_run=args.wandb_run,
         wandb_model=args.wandb_model,
+        resume=args.resume,
     )
 
 
