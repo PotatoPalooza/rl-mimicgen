@@ -68,12 +68,14 @@ class RobomimicVecEnv(VecEnv):
                 keyframe in-place (no re-randomisation of object placements; that
                 waits until the next horizon full-reset).
             video_trigger: Optional ``Callable[[int], bool]`` invoked each step with
-                the cumulative environment step count. When it returns True and no
-                recording is in progress, frames from env 0 start being captured and
-                written to ``video_dir`` as an mp4 when env 0 ends its episode
-                (early termination or horizon). Mirrors ``gym.wrappers.RecordVideo``'s
-                ``step_trigger`` pattern. Requires the underlying robomimic env to
-                have been created with ``render_offscreen=True``.
+                the cumulative environment step count. When it returns True, the
+                wrapper *arms* recording; capture then begins on the next step at
+                which env 0 is at the start of a fresh episode (i.e. just after its
+                previous episode ended, or the very first step after construction).
+                Frames are flushed to ``video_dir`` as an mp4 when env 0 ends that
+                episode. This guarantees each recorded clip starts at an episode
+                boundary rather than mid-rollout. Requires the underlying robomimic
+                env to have been created with ``render_offscreen=True``.
             video_dir: Directory to write mp4 files into. Defaults to the current
                 working directory if ``video_trigger`` is provided without one.
             video_width, video_height, video_fps, video_camera: mp4 framing options.
@@ -137,6 +139,10 @@ class RobomimicVecEnv(VecEnv):
         self._video_camera = video_camera
         self._video_step_count: int = 0
         self._video_active: bool = False
+        self._video_armed: bool = False
+        # True when the next step will be env 0's first step of a fresh episode.
+        # Initial reset in __init__ satisfies this for the very first step().
+        self._video_at_episode_start: bool = True
         self._video_frames: list[np.ndarray] = []
         self._video_start_step: int = 0
 
@@ -155,18 +161,27 @@ class RobomimicVecEnv(VecEnv):
         if self.clip_actions is not None:
             actions = torch.clamp(actions, -self.clip_actions, self.clip_actions)
 
-        # Check video trigger BEFORE stepping, so a fresh recording captures the
-        # initial-state frame of env 0. Only fires when not already recording.
+        # Video: arm on trigger, then begin capture only when env 0 is at the
+        # start of a fresh episode. This keeps each clip aligned to an episode
+        # boundary rather than cutting in mid-rollout.
         if (
             self._video_trigger is not None
             and not self._video_active
+            and not self._video_armed
             and self._video_trigger(self._video_step_count)
         ):
+            self._video_armed = True
+        if (
+            self._video_armed
+            and not self._video_active
+            and self._video_at_episode_start
+        ):
             self._video_active = True
+            self._video_armed = False
             self._video_start_step = self._video_step_count
             self._video_frames = []
             print(f"[INFO] Video: started recording env 0 at step={self._video_step_count} "
-                  f"(will flush when env 0's episode ends)")
+                  f"(episode start; will flush when env 0's episode ends)")
         if self._video_active:
             self._video_frames.append(self._render_env0())
 
@@ -209,8 +224,13 @@ class RobomimicVecEnv(VecEnv):
         dones = (timeouts | early).long()
 
         # Finalize an in-progress video recording if env 0 just ended its episode.
-        if self._video_active and bool(dones[0].item()):
+        env0_done = bool(dones[0].item())
+        if self._video_active and env0_done:
             self._finalize_video()
+        # Env 0 resets inside this step (success / divergence / timeout branches
+        # above all call _reset_envs on env 0 when it's in the done mask), so
+        # the *next* step() call will be at the start of env 0's new episode.
+        self._video_at_episode_start = env0_done
 
         # Per-env episode accounting
         if early.any():
@@ -279,6 +299,7 @@ class RobomimicVecEnv(VecEnv):
 
     def reset(self) -> tuple[TensorDict, dict]:
         self._full_reset()
+        self._video_at_episode_start = True
         return self._cached_obs_td, {}
 
     def seed(self, seed: int = -1) -> int:
@@ -301,7 +322,7 @@ class RobomimicVecEnv(VecEnv):
         if getattr(sim, "_render_context_offscreen", None) is None:
             raise RuntimeError(
                 "MjSimWarp has no offscreen render context; was the env created "
-                "with render_offscreen=True? (train_rl.py enables this only when "
+                "with render_offscreen=True? (rl_mimicgen.rsl_rl.train_rl enables this only when "
                 "--video is passed.)"
             )
         frame = sim.render(
