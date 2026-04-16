@@ -16,7 +16,7 @@
     "rnn_num_layers": null,
     "distribution_cfg": {
       "class_name": "GaussianDistribution",
-      "init_std": 0.3,
+      "init_std": 0.05,
       "std_type": "scalar"
     }
   },
@@ -27,7 +27,7 @@
     "obs_normalization": false
   },
   "algorithm": {
-    "class_name": "PPO",
+    "class_name": "rl_mimicgen.rsl_rl.algorithms:DAPG",
     "value_loss_coef": 1.0,
     "use_clipped_value_loss": true,
     "clip_param": 0.2,
@@ -41,6 +41,21 @@
     "desired_kl": 0.01,
     "max_grad_norm": 1.0,
     "rnd_cfg": null,
-    "symmetry_cfg": null
+    "symmetry_cfg": null,
+    "dapg_lambda0": 0.1,
+    "dapg_lambda1": 0.995,
+    "dapg_batch_size": 64,
+    "demo_seq_length": 10,
+    "demo_stride": null,
+    "demo_filter_key": null,
+    "demo_dataset_path": null,
+    "demo_obs_keys": null
+  },
+  "video": {
+    "enabled": true,
+    "width": 512,
+    "height": 512,
+    "fps": 20,
+    "camera": null
   }
 }

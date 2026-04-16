@@ -1,12 +1,6 @@
-"""RSL-RL integration for robomimic warp environments."""
+"""Utility helpers for RSL-RL training on robomimic envs."""
 
-from rl_mimicgen.rsl_rl.algorithms import DAPG
-from rl_mimicgen.rsl_rl.modules import (
-    DemoStorage,
-    GMMDistribution,
-    TanhGaussianDistribution,
-)
-from rl_mimicgen.rsl_rl.utils import (
+from rl_mimicgen.rsl_rl.utils.bc_utils import (
     BCResumeInfo,
     build_actor_hidden_dims,
     build_distribution_cfg_from_bc,
@@ -15,15 +9,9 @@ from rl_mimicgen.rsl_rl.utils import (
     fetch_wandb_checkpoint,
     load_bc_checkpoint,
 )
-from rl_mimicgen.rsl_rl.wrappers import RobomimicVecEnv
 
 __all__ = [
     "BCResumeInfo",
-    "DAPG",
-    "DemoStorage",
-    "GMMDistribution",
-    "RobomimicVecEnv",
-    "TanhGaussianDistribution",
     "build_actor_hidden_dims",
     "build_distribution_cfg_from_bc",
     "copy_bc_weights_into_actor",
