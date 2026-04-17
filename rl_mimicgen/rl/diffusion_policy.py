@@ -168,13 +168,13 @@ class DiffusionOnlinePolicyAdapter(nn.Module):
                     self._train_action_queues[env_idx].extend(action_sequences[local_idx].unbind(dim=0))
                 replan_data = {
                     "env_indices": np.asarray(replan_ids, dtype=np.int64),
-                    "obs_history": {key: value.detach().clone() for key, value in replan_obs_history.items()},
-                    "goals": None if replan_goal_batch is None else {key: value.detach().clone() for key, value in replan_goal_batch.items()},
-                    "chain_samples": chain_samples.detach().clone(),
-                    "chain_next_samples": chain_next_samples.detach().clone(),
-                    "chain_timesteps": chain_timesteps.detach().clone(),
-                    "log_probs": log_probs.detach().clone(),
-                    "values": values.detach().clone(),
+                    "obs_history": replan_obs_history,
+                    "goals": replan_goal_batch,
+                    "chain_samples": chain_samples,
+                    "chain_next_samples": chain_next_samples,
+                    "chain_timesteps": chain_timesteps,
+                    "log_probs": log_probs,
+                    "values": values,
                 }
 
             env_action = torch.stack([queue.popleft() for queue in self._train_action_queues], dim=0)
