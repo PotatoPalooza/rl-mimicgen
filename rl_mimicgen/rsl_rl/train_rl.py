@@ -19,6 +19,8 @@ import json
 import os
 import re
 import sys
+import time
+from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
@@ -33,6 +35,7 @@ for _sub in ("robomimic", "robosuite", "mimicgen"):
 
 import robomimic.utils.env_utils as EnvUtils
 import robomimic.utils.obs_utils as ObsUtils
+from robomimic.utils.train_utils import suppress_warp_kernel_warnings
 
 from rsl_rl.runners import OnPolicyRunner
 
@@ -44,6 +47,7 @@ from rl_mimicgen.rsl_rl import (
     fetch_wandb_checkpoint,
     load_bc_checkpoint,
 )
+from rl_mimicgen.rsl_rl.warp_buffer_sizes import resolve_warp_buffer_sizes
 
 
 def parse_args():
@@ -63,10 +67,36 @@ def parse_args():
                              "(env meta and RNN config are still taken from the ckpt).")
 
     # -- Environment --
-    parser.add_argument("--num_envs", type=int, default=50,
-                        help="Number of parallel warp environments.")
+    parser.add_argument("--num_envs", type=int, default=None,
+                        help="Number of parallel warp environments. Overrides the value "
+                             "in ppo_cfg.json / dapg_cfg.json if set (default there: 4096).")
     parser.add_argument("--horizon", type=int, default=400,
                         help="Maximum episode length (steps).")
+    parser.add_argument("--physics_timestep", type=float, default=None,
+                        help="Override robosuite.macros.SIMULATION_TIMESTEP "
+                             "(default 0.002). Larger values proportionally "
+                             "reduce substeps per env.step (25 substeps at "
+                             "2ms → 13 at 4ms) — biggest sim-perf knob, but "
+                             "trades fidelity (see CLAUDE.md warp perf notes). "
+                             "Overrides ppo_cfg.json / dapg_cfg.json's "
+                             "physics_timestep if set.")
+    parser.add_argument("--njmax_per_env", type=int, default=None,
+                        help="Override MjSimWarp per-world nefc cap. Default: "
+                             "look up from rl_mimicgen.rsl_rl.warp_buffer_sizes."
+                             "PER_TASK_WARP_BUFFER_SIZES by env_name, falling "
+                             "back to the class default (3500). Shrinking frees "
+                             "GPU memory but can select different JIT-specialised "
+                             "warp kernels — see CLAUDE.md.")
+    parser.add_argument("--naconmax_per_env", type=int, default=None,
+                        help="Override MjSimWarp per-env contact-buffer slice "
+                             "(total naconmax = this x num_envs). Same fallback "
+                             "chain as --njmax_per_env.")
+    parser.add_argument("--graph_capture", action=argparse.BooleanOptionalAction, default=True,
+                        help="Enable CUDA graph capture in MjSimWarp.step "
+                             "(ROBOSUITE_WARP_GRAPH=1). ~1.89x speedup at 2048 envs, "
+                             "accuracy-neutral. At 4096 envs needs ~1 GB headroom -- "
+                             "relies on the per-task buffer caps (e.g. 500/15 for "
+                             "Coffee) to fit. Pass --no-graph_capture to disable.")
 
     # -- RL training --
     parser.add_argument("--max_iterations", type=int, default=None,
@@ -121,6 +151,16 @@ def parse_args():
                         help="Initial std for the Tanh-Gaussian head (non-GMM BC only). "
                              "Default: 0.05. Ignored when the BC policy is GMM.")
 
+    # -- Profiling --
+    parser.add_argument("--profile", action="store_true",
+                        help="Print per-phase wallclock timings (act, env.step, "
+                             "process_env_step, compute_returns, update) every "
+                             "save_interval iterations. Uses cuda.synchronize().")
+    parser.add_argument("--torch_profile", action="store_true",
+                        help="Dump a torch.profiler trace over iterations 2-4 to "
+                             "<log_dir>/trace.json (viewable in chrome://tracing "
+                             "or tensorboard). Adds ~one-iter overhead.")
+
     # -- Logging --
     parser.add_argument("--experiment_name", type=str, default="robomimic_rl")
     parser.add_argument("--run_name", type=str, default="")
@@ -145,6 +185,75 @@ def parse_args():
                              "num_steps_per_env * save_interval if neither is set.")
 
     return parser.parse_args()
+
+
+def _install_profiling_hooks(
+    vec_env,
+    runner,
+    device: torch.device,
+    report_every: int,
+    torch_profiler=None,
+) -> None:
+    """Wrap env/alg methods with cuda-synced timers; print totals every `report_every`
+    calls to alg.update (one per PPO iter). If torch_profiler is provided, also
+    step it once per update.
+    """
+    totals: dict[str, float] = defaultdict(float)
+    counts: dict[str, int] = defaultdict(int)
+    state = {"iter": 0}
+    use_cuda = device.type == "cuda"
+
+    def _wrap(obj, name, label):
+        orig = getattr(obj, name)
+
+        def wrapped(*args, **kwargs):
+            if use_cuda:
+                torch.cuda.synchronize()
+            t0 = time.perf_counter()
+            out = orig(*args, **kwargs)
+            if use_cuda:
+                torch.cuda.synchronize()
+            totals[label] += time.perf_counter() - t0
+            counts[label] += 1
+            return out
+
+        setattr(obj, name, wrapped)
+
+    _wrap(vec_env, "step", "env.step")
+    _wrap(runner.alg, "act", "alg.act")
+    _wrap(runner.alg, "process_env_step", "alg.process_env_step")
+    _wrap(runner.alg, "compute_returns", "alg.compute_returns")
+
+    orig_update = runner.alg.update
+
+    def timed_update(*args, **kwargs):
+        if use_cuda:
+            torch.cuda.synchronize()
+        t0 = time.perf_counter()
+        out = orig_update(*args, **kwargs)
+        if use_cuda:
+            torch.cuda.synchronize()
+        totals["alg.update"] += time.perf_counter() - t0
+        counts["alg.update"] += 1
+        state["iter"] += 1
+        if torch_profiler is not None:
+            torch_profiler.step()
+        if state["iter"] % report_every == 0:
+            total = sum(totals.values())
+            print(f"\n[PROFILE] over last {report_every} iters (total {total:.2f}s, "
+                  f"{total / report_every:.3f}s/iter):")
+            for label in ["alg.act", "env.step", "alg.process_env_step",
+                          "alg.compute_returns", "alg.update"]:
+                t = totals[label]
+                pct = 100.0 * t / total if total > 0 else 0.0
+                n = counts[label]
+                per = t / n if n else 0.0
+                print(f"  {label:<25s} {t:7.2f}s  ({pct:5.1f}%)  n={n:<6d} {per*1000:7.2f} ms/call")
+            totals.clear()
+            counts.clear()
+        return out
+
+    runner.alg.update = timed_update
 
 
 def _default_wandb_project(env_meta: dict, obs_modalities: dict, algo: str = "ppo") -> str:
@@ -207,6 +316,8 @@ def _build_train_cfg(args, bc_info) -> dict:
         cfg["max_iterations"] = args.max_iterations
     if args.num_steps_per_env is not None:
         cfg["num_steps_per_env"] = args.num_steps_per_env
+    if args.num_envs is not None:
+        cfg["num_envs"] = args.num_envs
     if args.save_interval is not None:
         cfg["save_interval"] = args.save_interval
     if args.init_noise_std is not None and not bc_info.is_gmm:
@@ -274,6 +385,7 @@ def main():
     # 3. Build RSL-RL training config (ppo_cfg.json / dapg_cfg.json + BC fields + CLI)
     # ------------------------------------------------------------------
     train_cfg = _build_train_cfg(args, bc_info)
+    args.num_envs = int(train_cfg.get("num_envs", 4096))
     cfg_path_used = args.dapg_cfg if args.dapg else args.ppo_cfg
     print(f"[INFO] Loaded {'DAPG' if args.dapg else 'PPO'} config from: {cfg_path_used}")
     dist_cfg = train_cfg["actor"]["distribution_cfg"]
@@ -295,6 +407,17 @@ def main():
     # ------------------------------------------------------------------
     # 4. Create robomimic warp environment (from BC env metadata)
     # ------------------------------------------------------------------
+    # Apply physics_timestep override (CLI > config). Must be done before the
+    # env is created — robosuite reads macros.SIMULATION_TIMESTEP at compile
+    # and also propagates it into each controller's timestep.
+    cfg_timestep = train_cfg.get("physics_timestep")
+    phys_ts = args.physics_timestep if args.physics_timestep is not None else cfg_timestep
+    if phys_ts is not None:
+        import robosuite.macros as _rs_macros
+        _rs_macros.SIMULATION_TIMESTEP = float(phys_ts)
+        print(f"[INFO] SIMULATION_TIMESTEP -> {_rs_macros.SIMULATION_TIMESTEP} "
+              f"(substeps/env.step = {int(0.05 / float(phys_ts))})")
+
     # Prime robomimic's global obs-modality registry before creating the env.
     ObsUtils.initialize_obs_utils_with_obs_specs(obs_modality_specs=[bc_info.obs_modalities])
 
@@ -309,8 +432,24 @@ def main():
     cfg_env_kwargs: dict = train_cfg.get("env_kwargs", {}) or {}
     if cfg_env_kwargs and "coffee" in str(env_meta.get("env_name", "")).lower():
         env_meta.setdefault("env_kwargs", {}).update(cfg_env_kwargs)
+
+    # Per-task MjSimWarp buffer-size overrides. Table → CLI override order.
+    # CLI values (if set) win over the table; task is inferred from env_name.
+    warp_caps = resolve_warp_buffer_sizes(env_meta.get("env_name")) or {}
+    if args.njmax_per_env is not None:
+        warp_caps["njmax_per_env"] = int(args.njmax_per_env)
+    if args.naconmax_per_env is not None:
+        warp_caps["naconmax_per_env"] = int(args.naconmax_per_env)
+    if warp_caps:
+        env_meta.setdefault("env_kwargs", {}).update(warp_caps)
+
+    # Graph capture is read from env var inside MjSimWarp.__init__, so set it
+    # before robosuite.make fires via create_env_from_metadata.
+    os.environ["ROBOSUITE_WARP_GRAPH"] = "1" if args.graph_capture else "0"
+
     print(f"[INFO] Creating warp env (num_envs={args.num_envs}, horizon={args.horizon}, "
-          f"env_kwargs={cfg_env_kwargs})")
+          f"env_kwargs={cfg_env_kwargs}, warp_caps={warp_caps or '(class defaults)'}, "
+          f"graph_capture={args.graph_capture})")
     env = EnvUtils.create_env_from_metadata(
         env_meta=env_meta,
         render=False,
@@ -377,7 +516,31 @@ def main():
     print(f"[INFO] Starting {'DAPG' if args.dapg else 'PPO'}: "
           f"{train_cfg['max_iterations']} iters, "
           f"{train_cfg['num_steps_per_env']} steps/env/update, {args.num_envs} envs")
-    runner.learn(num_learning_iterations=train_cfg["max_iterations"], init_at_random_ep_len=True)
+
+    torch_prof = None
+    if args.torch_profile:
+        trace_path = os.path.join(log_dir, "trace.json")
+        torch_prof = torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CPU,
+                        torch.profiler.ProfilerActivity.CUDA],
+            schedule=torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=1),
+            on_trace_ready=lambda p: (p.export_chrome_trace(trace_path),
+                                      print(f"[PROFILE] torch trace → {trace_path}")),
+        )
+        torch_prof.start()
+
+    if args.profile or torch_prof is not None:
+        report_every = args.save_interval if args.save_interval else train_cfg.get("save_interval", 50)
+        _install_profiling_hooks(vec_env, runner, device, report_every=max(1, int(report_every)),
+                                 torch_profiler=torch_prof)
+        print(f"[INFO] Profiling enabled (report every {report_every} iters)")
+
+    try:
+        with suppress_warp_kernel_warnings():
+            runner.learn(num_learning_iterations=train_cfg["max_iterations"], init_at_random_ep_len=True)
+    finally:
+        if torch_prof is not None:
+            torch_prof.stop()
 
     print("[INFO] Training complete.")
     vec_env.close()
