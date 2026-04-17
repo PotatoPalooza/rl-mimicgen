@@ -26,6 +26,8 @@ class DiffusionOnlinePolicyAdapter(nn.Module):
         value_hidden_sizes: tuple[int, ...] = (256, 256),
         num_inference_timesteps: int | None = None,
         ft_denoising_steps: int | None = None,
+        min_sampling_denoising_std: float | None = None,
+        min_logprob_denoising_std: float | None = None,
         use_ema: bool = False,
     ) -> None:
         super().__init__()
@@ -60,6 +62,12 @@ class DiffusionOnlinePolicyAdapter(nn.Module):
         if ft_denoising_steps is not None:
             configured_ft_steps = ft_denoising_steps
         self.ft_denoising_steps = None if configured_ft_steps is None else int(configured_ft_steps)
+        self.min_sampling_denoising_std = (
+            None if min_sampling_denoising_std is None else float(min_sampling_denoising_std)
+        )
+        self.min_logprob_denoising_std = (
+            None if min_logprob_denoising_std is None else float(min_logprob_denoising_std)
+        )
         # PPO rollouts must come from the same live policy weights that are
         # later replayed inside the PPO objective. Using EMA samples for data
         # collection makes the batch off-policy immediately, so the EMA path is
@@ -452,10 +460,12 @@ class DiffusionOnlinePolicyAdapter(nn.Module):
                 next_sample = mean
                 step_log_prob = torch.zeros_like(next_sample)
             else:
-                std = variance.sqrt()
+                sampling_variance = _apply_min_std_floor(variance, self.min_sampling_denoising_std)
+                std = sampling_variance.sqrt()
                 next_sample = mean + (std * torch.randn_like(mean))
-                step_log_prob = _gaussian_log_prob_per_dim(next_sample, mean, variance)
-                chain_log_prob += _gaussian_log_prob(next_sample, mean, variance)
+                logprob_variance = _apply_min_std_floor(variance, self.min_logprob_denoising_std)
+                step_log_prob = _gaussian_log_prob_per_dim(next_sample, mean, logprob_variance)
+                chain_log_prob += _gaussian_log_prob(next_sample, mean, logprob_variance)
             chain_samples.append(current)
             chain_next_samples.append(next_sample)
             chain_timesteps.append(timesteps)
@@ -514,6 +524,7 @@ class DiffusionOnlinePolicyAdapter(nn.Module):
             timesteps = chain_timesteps[:, chain_idx]
             noise_pred = noise_pred_net(sample=current, timestep=timesteps, global_cond=obs_cond)
             mean, variance = _ddpm_reverse_stats(self.algo.noise_scheduler, noise_pred, timesteps, current)
+            variance = _apply_min_std_floor(variance, self.min_logprob_denoising_std)
             stochastic_mask = timesteps > 0
             if stochastic_mask.any():
                 log_prob = _gaussian_log_prob(next_sample, mean, variance)
@@ -537,6 +548,7 @@ class DiffusionOnlinePolicyAdapter(nn.Module):
         if chain_timesteps.ndim == 1:
             noise_pred = noise_pred_net(sample=chain_samples, timestep=chain_timesteps, global_cond=obs_cond)
             mean, variance = _ddpm_reverse_stats(self.algo.noise_scheduler, noise_pred, chain_timesteps, chain_samples)
+            variance = _apply_min_std_floor(variance, self.min_logprob_denoising_std)
             return _gaussian_log_prob_per_dim(chain_next_samples, mean, variance)
 
         batch_size, chain_len = chain_timesteps.shape
@@ -548,6 +560,7 @@ class DiffusionOnlinePolicyAdapter(nn.Module):
         flat_timesteps = chain_timesteps.reshape(-1)
         noise_pred = noise_pred_net(sample=flat_samples, timestep=flat_timesteps, global_cond=obs_cond)
         mean, variance = _ddpm_reverse_stats(self.algo.noise_scheduler, noise_pred, flat_timesteps, flat_samples)
+        variance = _apply_min_std_floor(variance, self.min_logprob_denoising_std)
         log_probs = _gaussian_log_prob_per_dim(flat_next_samples, mean, variance)
         return log_probs.reshape(batch_size, chain_len, *chain_next_samples.shape[-2:])
 
@@ -570,6 +583,16 @@ def _safe_getattr(obj: Any, name: str, default: Any = None) -> Any:
         return getattr(obj, name)
     except (AttributeError, RuntimeError):
         return default
+
+
+def _apply_min_std_floor(variance: torch.Tensor, min_std: float | None) -> torch.Tensor:
+    variance = variance.clamp(min=1e-12)
+    if min_std is None:
+        return variance
+    min_variance = max(float(min_std), 0.0) ** 2
+    if min_variance == 0.0:
+        return variance
+    return variance.clamp(min=min_variance)
 
 
 def _gaussian_log_prob(value: torch.Tensor, mean: torch.Tensor, variance: torch.Tensor) -> torch.Tensor:
