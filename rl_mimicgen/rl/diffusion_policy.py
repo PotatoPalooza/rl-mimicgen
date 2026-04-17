@@ -11,6 +11,8 @@ import torch.nn.functional as F
 
 import robomimic.utils.obs_utils as ObsUtils
 import robomimic.utils.tensor_utils as TensorUtils
+from diffusers.schedulers.scheduling_ddim import DDIMScheduler
+from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 from robomimic.models.value_nets import ValueNetwork
 
 from rl_mimicgen.rl.policy import PolicyBundle
@@ -26,6 +28,8 @@ class DiffusionOnlinePolicyAdapter(nn.Module):
         value_hidden_sizes: tuple[int, ...] = (256, 256),
         num_inference_timesteps: int | None = None,
         ft_denoising_steps: int | None = None,
+        use_ddim: bool = False,
+        ddim_steps: int | None = None,
         min_sampling_denoising_std: float | None = None,
         min_logprob_denoising_std: float | None = None,
         use_ema: bool = False,
@@ -44,16 +48,18 @@ class DiffusionOnlinePolicyAdapter(nn.Module):
         self.residual_enabled = False
         self.learned_log_std = None
         self.is_diffusion_policy = True
-
-        if not bool(getattr(bundle.config.algo.ddpm, "enabled", False)):
-            raise NotImplementedError("The diffusion online RL path currently supports DDPM schedulers only.")
+        self.use_ddim = bool(use_ddim)
 
         self.observation_horizon = int(bundle.config.algo.horizon.observation_horizon)
         self.action_horizon = int(bundle.config.algo.horizon.action_horizon)
         self.prediction_horizon = int(bundle.config.algo.horizon.prediction_horizon)
         self.action_dim = int(bundle.shape_meta["ac_dim"])
         self.num_inference_timesteps = int(
-            num_inference_timesteps or getattr(bundle.config.algo.ddpm, "num_inference_timesteps")
+            self._resolve_num_inference_timesteps(
+                bundle=bundle,
+                num_inference_timesteps=num_inference_timesteps,
+                ddim_steps=ddim_steps,
+            )
         )
         train_config = _safe_getattr(bundle.config, "train", None)
         configured_ft_steps = _safe_getattr(train_config, "ft_denoising_steps", None)
@@ -80,10 +86,56 @@ class DiffusionOnlinePolicyAdapter(nn.Module):
             mlp_layer_dims=list(value_hidden_sizes),
             encoder_kwargs=ObsUtils.obs_encoder_kwargs_from_config(self.algo.obs_config.encoder),
         ).float().to(device)
+        self.sampling_scheduler = self._build_sampling_scheduler(bundle=bundle)
 
         self._rollout_obs_history: dict[str, torch.Tensor] | None = None
         self._train_action_queues: list[deque[torch.Tensor]] | None = None
         self._eval_action_queues: list[deque[torch.Tensor]] | None = None
+
+    def _resolve_num_inference_timesteps(
+        self,
+        bundle: PolicyBundle,
+        num_inference_timesteps: int | None,
+        ddim_steps: int | None,
+    ) -> int:
+        if self.use_ddim:
+            configured_ddim_steps = ddim_steps
+            if configured_ddim_steps is None:
+                configured_ddim_steps = _safe_getattr(bundle.config.algo.ddim, "num_inference_timesteps", None)
+            if num_inference_timesteps is not None:
+                configured_ddim_steps = num_inference_timesteps
+            if configured_ddim_steps is None:
+                raise ValueError("DDIM fine-tuning requires ddim_steps or num_inference_timesteps to be configured.")
+            return int(configured_ddim_steps)
+
+        configured_ddpm_steps = num_inference_timesteps
+        if configured_ddpm_steps is None:
+            configured_ddpm_steps = _safe_getattr(bundle.config.algo.ddpm, "num_inference_timesteps", None)
+        if configured_ddpm_steps is None:
+            raise ValueError("DDPM fine-tuning requires num_inference_timesteps to be configured.")
+        return int(configured_ddpm_steps)
+
+    def _build_sampling_scheduler(self, bundle: PolicyBundle):
+        if self.use_ddim:
+            ddim_cfg = bundle.config.algo.ddim
+            return DDIMScheduler(
+                num_train_timesteps=int(_safe_getattr(ddim_cfg, "num_train_timesteps", 100)),
+                beta_schedule=str(_safe_getattr(ddim_cfg, "beta_schedule", "squaredcos_cap_v2")),
+                clip_sample=bool(_safe_getattr(ddim_cfg, "clip_sample", True)),
+                set_alpha_to_one=bool(_safe_getattr(ddim_cfg, "set_alpha_to_one", True)),
+                steps_offset=int(_safe_getattr(ddim_cfg, "steps_offset", 0)),
+                prediction_type=str(_safe_getattr(ddim_cfg, "prediction_type", "epsilon")),
+            )
+
+        ddpm_cfg = bundle.config.algo.ddpm
+        if not bool(_safe_getattr(ddpm_cfg, "enabled", False)):
+            raise NotImplementedError("The diffusion online RL path requires a DDPM checkpoint config when DDIM is not enabled.")
+        return DDPMScheduler(
+            num_train_timesteps=int(_safe_getattr(ddpm_cfg, "num_train_timesteps", 100)),
+            beta_schedule=str(_safe_getattr(ddpm_cfg, "beta_schedule", "squaredcos_cap_v2")),
+            clip_sample=bool(_safe_getattr(ddpm_cfg, "clip_sample", True)),
+            prediction_type=str(_safe_getattr(ddpm_cfg, "prediction_type", "epsilon")),
+        )
 
     def actor_parameters(self) -> list[nn.Parameter]:
         return list(self.actor.parameters())
@@ -440,7 +492,7 @@ class DiffusionOnlinePolicyAdapter(nn.Module):
         use_ema: bool,
         record_step_log_probs: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
-        scheduler = self.algo.noise_scheduler
+        scheduler = self.sampling_scheduler
         scheduler.set_timesteps(self.num_inference_timesteps)
         obs_cond = self._encode_obs_history(obs_history=obs_history, goal_batch=goal_batch, use_ema=use_ema)
         batch_size = next(iter(obs_history.values())).shape[0]
@@ -455,7 +507,7 @@ class DiffusionOnlinePolicyAdapter(nn.Module):
         for timestep in scheduler.timesteps:
             timesteps = torch.full((batch_size,), int(timestep), device=self.device, dtype=torch.long)
             noise_pred = noise_pred_net(sample=current, timestep=timesteps, global_cond=obs_cond)
-            mean, variance = _ddpm_reverse_stats(scheduler, noise_pred, timesteps, current)
+            mean, variance = _scheduler_reverse_stats(scheduler, noise_pred, timesteps, current)
             if deterministic or int(timestep) == 0:
                 next_sample = mean
                 step_log_prob = torch.zeros_like(next_sample)
@@ -523,7 +575,7 @@ class DiffusionOnlinePolicyAdapter(nn.Module):
             next_sample = chain_next_samples[:, chain_idx]
             timesteps = chain_timesteps[:, chain_idx]
             noise_pred = noise_pred_net(sample=current, timestep=timesteps, global_cond=obs_cond)
-            mean, variance = _ddpm_reverse_stats(self.algo.noise_scheduler, noise_pred, timesteps, current)
+            mean, variance = _scheduler_reverse_stats(self.sampling_scheduler, noise_pred, timesteps, current)
             variance = _apply_min_std_floor(variance, self.min_logprob_denoising_std)
             stochastic_mask = timesteps > 0
             if stochastic_mask.any():
@@ -547,7 +599,7 @@ class DiffusionOnlinePolicyAdapter(nn.Module):
         noise_pred_net = self._policy_nets(use_ema=False)["noise_pred_net"]
         if chain_timesteps.ndim == 1:
             noise_pred = noise_pred_net(sample=chain_samples, timestep=chain_timesteps, global_cond=obs_cond)
-            mean, variance = _ddpm_reverse_stats(self.algo.noise_scheduler, noise_pred, chain_timesteps, chain_samples)
+            mean, variance = _scheduler_reverse_stats(self.sampling_scheduler, noise_pred, chain_timesteps, chain_samples)
             variance = _apply_min_std_floor(variance, self.min_logprob_denoising_std)
             return _gaussian_log_prob_per_dim(chain_next_samples, mean, variance)
 
@@ -559,7 +611,7 @@ class DiffusionOnlinePolicyAdapter(nn.Module):
         )
         flat_timesteps = chain_timesteps.reshape(-1)
         noise_pred = noise_pred_net(sample=flat_samples, timestep=flat_timesteps, global_cond=obs_cond)
-        mean, variance = _ddpm_reverse_stats(self.algo.noise_scheduler, noise_pred, flat_timesteps, flat_samples)
+        mean, variance = _scheduler_reverse_stats(self.sampling_scheduler, noise_pred, flat_timesteps, flat_samples)
         variance = _apply_min_std_floor(variance, self.min_logprob_denoising_std)
         log_probs = _gaussian_log_prob_per_dim(flat_next_samples, mean, variance)
         return log_probs.reshape(batch_size, chain_len, *chain_next_samples.shape[-2:])
@@ -610,8 +662,21 @@ def _gaussian_log_prob_per_dim(value: torch.Tensor, mean: torch.Tensor, variance
     return -0.5 * (quadratic + log_variance + np.log(2.0 * np.pi))
 
 
-def _ddpm_reverse_stats(
+def _scheduler_reverse_stats(
     scheduler,
+    model_output: torch.Tensor,
+    timesteps: torch.Tensor,
+    sample: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if isinstance(scheduler, DDIMScheduler):
+        return _ddim_reverse_stats(scheduler, model_output, timesteps, sample)
+    if isinstance(scheduler, DDPMScheduler):
+        return _ddpm_reverse_stats(scheduler, model_output, timesteps, sample)
+    raise TypeError(f"Unsupported diffusion scheduler type: {type(scheduler)!r}")
+
+
+def _ddpm_reverse_stats(
+    scheduler: DDPMScheduler,
     model_output: torch.Tensor,
     timesteps: torch.Tensor,
     sample: torch.Tensor,
@@ -658,4 +723,52 @@ def _ddpm_reverse_stats(
     current_sample_coeff = (alphas_t.sqrt() * beta_prod_t_prev) / beta_prod_t
     mean = pred_original_coeff * pred_original_sample + current_sample_coeff * sample
     variance = ((1.0 - alpha_prod_t_prev) / (1.0 - alpha_prod_t) * betas_t).clamp(min=1e-20)
+    return mean, variance
+
+
+def _ddim_reverse_stats(
+    scheduler: DDIMScheduler,
+    model_output: torch.Tensor,
+    timesteps: torch.Tensor,
+    sample: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    timesteps = timesteps.to(device=sample.device, dtype=torch.long)
+    num_train_timesteps = int(scheduler.config.num_train_timesteps)
+    if torch.any(timesteps < 0) or torch.any(timesteps >= num_train_timesteps):
+        invalid_min = int(timesteps.min().item())
+        invalid_max = int(timesteps.max().item())
+        raise ValueError(
+            f"Diffusion timesteps out of range: min={invalid_min}, max={invalid_max}, "
+            f"expected in [0, {num_train_timesteps - 1}]"
+        )
+
+    if scheduler.num_inference_steps is None:
+        raise ValueError("DDIM scheduler timesteps have not been initialized; call set_timesteps first.")
+
+    step_stride = max(1, num_train_timesteps // int(scheduler.num_inference_steps))
+    prev_timesteps = timesteps - step_stride
+
+    flat_timesteps = timesteps.reshape(-1)
+    flat_prev_timesteps = prev_timesteps.reshape(-1)
+    flat_model_output = model_output.reshape(-1, *model_output.shape[1:])
+    flat_sample = sample.reshape(-1, *sample.shape[1:])
+
+    prev_samples = []
+    variances = []
+    for idx in range(flat_timesteps.shape[0]):
+        timestep = int(flat_timesteps[idx].item())
+        prev_timestep = int(flat_prev_timesteps[idx].item())
+        step_out = scheduler.step(
+            model_output=flat_model_output[idx],
+            timestep=timestep,
+            sample=flat_sample[idx],
+            eta=0.0,
+            return_dict=True,
+        )
+        prev_samples.append(step_out.prev_sample)
+        variances.append(float(scheduler._get_variance(timestep, prev_timestep)))
+
+    mean = torch.stack(prev_samples, dim=0).reshape_as(sample)
+    variance = torch.tensor(variances, dtype=sample.dtype, device=sample.device).view(-1, 1, 1)
+    variance = variance.reshape(*timesteps.shape, 1, 1)
     return mean, variance

@@ -42,6 +42,8 @@ class OnlineRLTrainer:
                 device=self.device,
                 num_inference_timesteps=config.diffusion.num_inference_timesteps,
                 ft_denoising_steps=config.diffusion.ft_denoising_steps,
+                use_ddim=config.diffusion.use_ddim,
+                ddim_steps=config.diffusion.ddim_steps,
                 min_sampling_denoising_std=config.diffusion.min_sampling_denoising_std,
                 min_logprob_denoising_std=config.diffusion.min_logprob_denoising_std,
                 use_ema=config.diffusion.use_ema,
