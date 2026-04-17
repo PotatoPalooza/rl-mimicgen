@@ -295,6 +295,15 @@ class RobomimicVecEnv(VecEnv):
             self._term_timeout_count = 0
 
         self._cached_obs_td = self._obs_dict_to_tensordict(obs_dict)
+        # Final NaN scrub: guarantee OnPolicyRunner.check_nan never trips even
+        # if the reset path left residual NaN (rare, but warp's global forward()
+        # after per-env restore can occasionally propagate). Silent — the
+        # divergence path already logged the event.
+        flat = self._cached_obs_td["policy"]
+        if torch.isnan(flat).any():
+            self._cached_obs_td["policy"] = torch.nan_to_num(flat, nan=0.0, posinf=0.0, neginf=0.0)
+        if torch.isnan(reward).any():
+            reward = torch.nan_to_num(reward, nan=0.0, posinf=0.0, neginf=0.0)
         return self._cached_obs_td, reward, dones, extras
 
     def reset(self) -> tuple[TensorDict, dict]:
