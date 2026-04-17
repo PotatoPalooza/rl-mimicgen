@@ -354,7 +354,7 @@ class DiffusionOnlinePolicyAdapter(nn.Module):
         deterministic: bool,
         use_ema: bool,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        final_trajectory, chain_log_prob, chain_samples, chain_next_samples, chain_timesteps = self._run_diffusion_chain(
+        final_trajectory, chain_log_prob, chain_samples, chain_next_samples, chain_timesteps, _ = self._run_diffusion_chain(
             obs_history=obs_history,
             goal_batch=goal_batch,
             deterministic=deterministic,
@@ -376,7 +376,7 @@ class DiffusionOnlinePolicyAdapter(nn.Module):
         goal_batch: dict[str, torch.Tensor] | None,
         use_ema: bool,
     ) -> torch.Tensor:
-        final_trajectory, _, _, _, _ = self._run_diffusion_chain(
+        final_trajectory, _, _, _, _, _ = self._run_diffusion_chain(
             obs_history=obs_history,
             goal_batch=goal_batch,
             deterministic=True,
@@ -392,30 +392,19 @@ class DiffusionOnlinePolicyAdapter(nn.Module):
         goal_batch: dict[str, torch.Tensor] | None,
         use_ema: bool,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        final_trajectory, _, chain_samples, chain_next_samples, chain_timesteps = self._run_diffusion_chain(
+        final_trajectory, _, chain_samples, chain_next_samples, chain_timesteps, chain_log_probs = self._run_diffusion_chain(
             obs_history=obs_history,
             goal_batch=goal_batch,
             deterministic=False,
             use_ema=use_ema,
+            record_step_log_probs=True,
         )
         action_start = self.observation_horizon - 1
         action_end = action_start + self.action_horizon
-        mean, variance = self._chain_reverse_stats_tensor(
-            obs_history=obs_history,
-            goal_batch=goal_batch,
-            chain_samples=chain_samples[:, :, action_start:action_end],
-            chain_timesteps=chain_timesteps,
-        )
-        per_step_log_probs = _gaussian_log_prob_per_dim(
-            chain_next_samples[:, :, action_start:action_end],
-            mean,
-            variance,
-        )
-        stochastic_mask = (chain_timesteps > 0).unsqueeze(-1).unsqueeze(-1)
-        per_step_log_probs = torch.where(stochastic_mask, per_step_log_probs, torch.zeros_like(per_step_log_probs))
+        assert chain_log_probs is not None
         return (
             final_trajectory[:, action_start:action_end],
-            per_step_log_probs,
+            chain_log_probs[:, :, action_start:action_end],
             chain_samples,
             chain_next_samples,
             chain_timesteps,
@@ -427,7 +416,8 @@ class DiffusionOnlinePolicyAdapter(nn.Module):
         goal_batch: dict[str, torch.Tensor] | None,
         deterministic: bool,
         use_ema: bool,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        record_step_log_probs: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
         scheduler = self.algo.noise_scheduler
         scheduler.set_timesteps(self.num_inference_timesteps)
         obs_cond = self._encode_obs_history(obs_history=obs_history, goal_batch=goal_batch, use_ema=use_ema)
@@ -436,6 +426,7 @@ class DiffusionOnlinePolicyAdapter(nn.Module):
         chain_samples = []
         chain_next_samples = []
         chain_timesteps = []
+        chain_step_log_probs = [] if record_step_log_probs else None
         chain_log_prob = torch.zeros(batch_size, device=self.device)
         noise_pred_net = self._policy_nets(use_ema=use_ema)["noise_pred_net"]
 
@@ -445,13 +436,17 @@ class DiffusionOnlinePolicyAdapter(nn.Module):
             mean, variance = _ddpm_reverse_stats(scheduler, noise_pred, timesteps, current)
             if deterministic or int(timestep) == 0:
                 next_sample = mean
+                step_log_prob = torch.zeros_like(next_sample)
             else:
                 std = variance.sqrt()
                 next_sample = mean + (std * torch.randn_like(mean))
+                step_log_prob = _gaussian_log_prob_per_dim(next_sample, mean, variance)
                 chain_log_prob += _gaussian_log_prob(next_sample, mean, variance)
             chain_samples.append(current)
             chain_next_samples.append(next_sample)
             chain_timesteps.append(timesteps)
+            if chain_step_log_probs is not None:
+                chain_step_log_probs.append(step_log_prob)
             current = next_sample
 
         return (
@@ -460,6 +455,7 @@ class DiffusionOnlinePolicyAdapter(nn.Module):
             torch.stack(chain_samples, dim=1),
             torch.stack(chain_next_samples, dim=1),
             torch.stack(chain_timesteps, dim=1),
+            None if chain_step_log_probs is None else torch.stack(chain_step_log_probs, dim=1),
         )
 
     def _ensure_eval_action_queues(self, batch_size: int) -> None:
