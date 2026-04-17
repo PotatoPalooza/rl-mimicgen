@@ -26,6 +26,7 @@ class DiffusionPPO:
         num_mini_batches: int = 4,
         clip_param: float = 0.2,
         value_loss_coef: float = 0.5,
+        gamma_denoising: float = 1.0,
         max_grad_norm: float = 0.5,
         target_kl: float | None = None,
         device: torch.device | str = "cpu",
@@ -42,6 +43,7 @@ class DiffusionPPO:
         self.num_mini_batches = max(1, int(num_mini_batches))
         self.clip_param = float(clip_param)
         self.value_loss_coef = float(value_loss_coef)
+        self.gamma_denoising = float(gamma_denoising)
         self.max_grad_norm = float(max_grad_norm)
         self.target_kl = None if target_kl is None else float(target_kl)
         self.device = torch.device(device)
@@ -130,8 +132,8 @@ class DiffusionPPO:
                 current_obs = {key: value[:, -1] for key, value in minibatch["observations"].items()}
                 current_values = self.policy.value_net(current_obs, goal_dict=minibatch["goals"]).squeeze(-1)
 
-                current_log_probs = current_log_probs.mean(dim=(-1, -2))
-                old_log_probs = minibatch["log_probs"].mean(dim=(-1, -2))
+                current_log_probs = self._reduce_denoising_log_probs(current_log_probs)
+                old_log_probs = self._reduce_denoising_log_probs(minibatch["log_probs"])
                 advantages = minibatch["advantages"]
                 returns = minibatch["returns"]
 
@@ -195,6 +197,18 @@ class DiffusionPPO:
             "returns": batch.returns[decision_indices],
             "advantages": batch.advantages[decision_indices],
         }
+
+    def _reduce_denoising_log_probs(self, log_probs: torch.Tensor) -> torch.Tensor:
+        per_step_log_probs = log_probs.mean(dim=(-1, -2))
+        if per_step_log_probs.ndim == 1:
+            return per_step_log_probs
+        chain_len = per_step_log_probs.shape[1]
+        weights = torch.pow(
+            torch.full((chain_len,), self.gamma_denoising, dtype=per_step_log_probs.dtype, device=per_step_log_probs.device),
+            torch.arange(chain_len - 1, -1, -1, dtype=per_step_log_probs.dtype, device=per_step_log_probs.device),
+        )
+        weights = weights / weights.sum().clamp(min=torch.finfo(weights.dtype).eps)
+        return (per_step_log_probs * weights.unsqueeze(0)).sum(dim=1)
 
 
 def _detach_diffusion_batch(batch: DiffusionRolloutBatch) -> DiffusionRolloutBatch:

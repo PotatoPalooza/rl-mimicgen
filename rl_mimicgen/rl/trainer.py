@@ -93,6 +93,7 @@ class OnlineRLTrainer:
                 num_mini_batches=self.config.ppo.num_minibatches,
                 clip_param=self.config.ppo.clip_ratio,
                 value_loss_coef=self.config.ppo.value_coef,
+                gamma_denoising=self.config.diffusion.gamma_denoising,
                 target_kl=self.config.ppo.target_kl,
                 max_grad_norm=self.config.optimizer.max_grad_norm,
                 device=self.device,
