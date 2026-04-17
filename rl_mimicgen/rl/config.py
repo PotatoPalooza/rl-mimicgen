@@ -72,6 +72,13 @@ class DiffusionConfig:
     enabled: bool = True
     num_inference_timesteps: int | None = None
     use_ema: bool = False
+    ft_denoising_steps: int | None = None
+    use_ddim: bool = False
+    ddim_steps: int | None = None
+    gamma_denoising: float = 1.0
+    min_sampling_denoising_std: float | None = None
+    min_logprob_denoising_std: float | None = None
+    act_steps: int | None = None
 
 
 @dataclass

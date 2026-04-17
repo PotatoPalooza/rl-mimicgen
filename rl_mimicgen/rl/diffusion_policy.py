@@ -25,6 +25,7 @@ class DiffusionOnlinePolicyAdapter(nn.Module):
         device: torch.device,
         value_hidden_sizes: tuple[int, ...] = (256, 256),
         num_inference_timesteps: int | None = None,
+        ft_denoising_steps: int | None = None,
         use_ema: bool = False,
     ) -> None:
         super().__init__()
@@ -52,6 +53,13 @@ class DiffusionOnlinePolicyAdapter(nn.Module):
         self.num_inference_timesteps = int(
             num_inference_timesteps or getattr(bundle.config.algo.ddpm, "num_inference_timesteps")
         )
+        train_config = getattr(bundle.config, "train", None)
+        configured_ft_steps = getattr(train_config, "ft_denoising_steps", None)
+        if configured_ft_steps is None:
+            configured_ft_steps = getattr(bundle.config.algo, "ft_denoising_steps", None)
+        if ft_denoising_steps is not None:
+            configured_ft_steps = ft_denoising_steps
+        self.ft_denoising_steps = None if configured_ft_steps is None else int(configured_ft_steps)
         # PPO rollouts must come from the same live policy weights that are
         # later replayed inside the PPO objective. Using EMA samples for data
         # collection makes the batch off-policy immediately, so the EMA path is
@@ -402,6 +410,12 @@ class DiffusionOnlinePolicyAdapter(nn.Module):
         action_start = self.observation_horizon - 1
         action_end = action_start + self.action_horizon
         assert chain_log_probs is not None
+        chain_samples, chain_next_samples, chain_timesteps, chain_log_probs = self._truncate_finetuning_chain(
+            chain_samples=chain_samples,
+            chain_next_samples=chain_next_samples,
+            chain_timesteps=chain_timesteps,
+            chain_log_probs=chain_log_probs,
+        )
         return (
             final_trajectory[:, action_start:action_end],
             chain_log_probs[:, :, action_start:action_end],
@@ -458,6 +472,23 @@ class DiffusionOnlinePolicyAdapter(nn.Module):
             None if chain_step_log_probs is None else torch.stack(chain_step_log_probs, dim=1),
         )
 
+    def _truncate_finetuning_chain(
+        self,
+        chain_samples: torch.Tensor,
+        chain_next_samples: torch.Tensor,
+        chain_timesteps: torch.Tensor,
+        chain_log_probs: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        if self.ft_denoising_steps is None:
+            return chain_samples, chain_next_samples, chain_timesteps, chain_log_probs
+        retained_steps = max(1, min(int(self.ft_denoising_steps), chain_timesteps.shape[1]))
+        return (
+            chain_samples[:, -retained_steps:],
+            chain_next_samples[:, -retained_steps:],
+            chain_timesteps[:, -retained_steps:],
+            chain_log_probs[:, -retained_steps:],
+        )
+
     def _ensure_eval_action_queues(self, batch_size: int) -> None:
         if self._eval_action_queues is None or len(self._eval_action_queues) != batch_size:
             self._eval_action_queues = [deque() for _ in range(batch_size)]
@@ -506,26 +537,6 @@ class DiffusionOnlinePolicyAdapter(nn.Module):
         noise_pred = noise_pred_net(sample=chain_samples, timestep=chain_timesteps, global_cond=obs_cond)
         mean, variance = _ddpm_reverse_stats(self.algo.noise_scheduler, noise_pred, chain_timesteps, chain_samples)
         return _gaussian_log_prob_per_dim(chain_next_samples, mean, variance)
-
-    def _chain_reverse_stats_tensor(
-        self,
-        obs_history: dict[str, torch.Tensor],
-        goal_batch: dict[str, torch.Tensor] | None,
-        chain_samples: torch.Tensor,
-        chain_timesteps: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        batch_size, chain_len = chain_timesteps.shape
-        obs_cond = self._encode_obs_history(obs_history=obs_history, goal_batch=goal_batch, use_ema=False)
-        obs_cond = obs_cond.unsqueeze(1).expand(-1, chain_len, -1).reshape(batch_size * chain_len, -1)
-        flat_samples = chain_samples.reshape(batch_size * chain_len, chain_samples.shape[-2], chain_samples.shape[-1])
-        flat_timesteps = chain_timesteps.reshape(-1)
-        noise_pred_net = self._policy_nets(use_ema=False)["noise_pred_net"]
-        noise_pred = noise_pred_net(sample=flat_samples, timestep=flat_timesteps, global_cond=obs_cond)
-        mean, variance = _ddpm_reverse_stats(self.algo.noise_scheduler, noise_pred, flat_timesteps, flat_samples)
-        mean = mean.reshape(batch_size, chain_len, *chain_samples.shape[-2:])
-        variance = variance.reshape(batch_size, chain_len, 1, 1)
-        return mean, variance
-
 
 def _clone_history_state(state: Any) -> Any:
     if state is None:

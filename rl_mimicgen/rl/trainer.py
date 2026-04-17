@@ -41,6 +41,7 @@ class OnlineRLTrainer:
                 bundle=self.bundle,
                 device=self.device,
                 num_inference_timesteps=config.diffusion.num_inference_timesteps,
+                ft_denoising_steps=config.diffusion.ft_denoising_steps,
                 use_ema=config.diffusion.use_ema,
             )
         else:
