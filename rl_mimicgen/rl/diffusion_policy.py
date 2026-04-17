@@ -30,6 +30,7 @@ class DiffusionOnlinePolicyAdapter(nn.Module):
         ft_denoising_steps: int | None = None,
         use_ddim: bool = False,
         ddim_steps: int | None = None,
+        act_steps: int | None = None,
         min_sampling_denoising_std: float | None = None,
         min_logprob_denoising_std: float | None = None,
         use_ema: bool = False,
@@ -53,6 +54,7 @@ class DiffusionOnlinePolicyAdapter(nn.Module):
         self.observation_horizon = int(bundle.config.algo.horizon.observation_horizon)
         self.action_horizon = int(bundle.config.algo.horizon.action_horizon)
         self.prediction_horizon = int(bundle.config.algo.horizon.prediction_horizon)
+        self.act_steps = self._resolve_act_steps(bundle=bundle, act_steps=act_steps)
         self.action_dim = int(bundle.shape_meta["ac_dim"])
         self.num_inference_timesteps = int(
             self._resolve_num_inference_timesteps(
@@ -114,6 +116,21 @@ class DiffusionOnlinePolicyAdapter(nn.Module):
         if configured_ddpm_steps is None:
             raise ValueError("DDPM fine-tuning requires num_inference_timesteps to be configured.")
         return int(configured_ddpm_steps)
+
+    def _resolve_act_steps(self, bundle: PolicyBundle, act_steps: int | None) -> int:
+        configured_act_steps = act_steps
+        if configured_act_steps is None:
+            configured_act_steps = _safe_getattr(bundle.config.algo.horizon, "act_steps", None)
+        if configured_act_steps is None:
+            configured_act_steps = self.action_horizon
+        configured_act_steps = int(configured_act_steps)
+        if configured_act_steps <= 0:
+            raise ValueError(f"act_steps must be positive, got {configured_act_steps}.")
+        if configured_act_steps > self.prediction_horizon:
+            raise ValueError(
+                f"act_steps={configured_act_steps} exceeds prediction_horizon={self.prediction_horizon}."
+            )
+        return configured_act_steps
 
     def _build_sampling_scheduler(self, bundle: PolicyBundle):
         if self.use_ddim:
@@ -451,7 +468,7 @@ class DiffusionOnlinePolicyAdapter(nn.Module):
             use_ema=use_ema,
         )
         action_start = self.observation_horizon - 1
-        action_end = action_start + self.action_horizon
+        action_end = action_start + self.act_steps
         return final_trajectory[:, action_start:action_end]
 
     def _sample_action_sequence_with_chain(
@@ -468,7 +485,7 @@ class DiffusionOnlinePolicyAdapter(nn.Module):
             record_step_log_probs=True,
         )
         action_start = self.observation_horizon - 1
-        action_end = action_start + self.action_horizon
+        action_end = action_start + self.act_steps
         assert chain_log_probs is not None
         chain_samples, chain_next_samples, chain_timesteps, chain_log_probs = self._truncate_finetuning_chain(
             chain_samples=chain_samples,

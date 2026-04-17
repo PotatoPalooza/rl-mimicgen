@@ -27,6 +27,7 @@ class DiffusionPPO:
         clip_param: float = 0.2,
         value_loss_coef: float = 0.5,
         gamma_denoising: float = 1.0,
+        act_steps: int | None = None,
         max_grad_norm: float = 0.5,
         target_kl: float | None = None,
         device: torch.device | str = "cpu",
@@ -44,6 +45,7 @@ class DiffusionPPO:
         self.clip_param = float(clip_param)
         self.value_loss_coef = float(value_loss_coef)
         self.gamma_denoising = float(gamma_denoising)
+        self.act_steps = None if act_steps is None else int(act_steps)
         self.max_grad_norm = float(max_grad_norm)
         self.target_kl = None if target_kl is None else float(target_kl)
         self.device = torch.device(device)
@@ -184,7 +186,7 @@ class DiffusionPPO:
         batch: DiffusionRolloutBatch,
         decision_indices: torch.Tensor,
     ) -> dict[str, Any]:
-        reward_horizon = self.policy.action_horizon
+        reward_horizon = self.policy.act_steps if self.act_steps is None else self.act_steps
         action_start = self.policy.observation_horizon - 1
         action_end = action_start + reward_horizon
         return {
