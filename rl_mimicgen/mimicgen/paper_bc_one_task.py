@@ -14,6 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Iterable, Optional
 
+from rl_mimicgen.diffusion_runtime import apply_runtime_profile_to_diffusion_payload, available_runtime_profiles
 from rl_mimicgen.mimicgen.runtime_checks import check_torch_cuda_compatibility
 
 WORKSPACE_DIR = Path(__file__).resolve().parents[2]
@@ -93,6 +94,8 @@ class Config:
     variants: Optional[list[str]]
     modalities: Optional[list[str]]
     algorithms: list[str]
+    diffusion_runtime_profile: str | None
+    experiment_name: str | None
     workspace_dir: Path
     run_root: Path
     data_dir: Path
@@ -205,6 +208,8 @@ class Runner:
         self.logger.info("Variants: %s", ",".join(self.cfg.variants) if self.cfg.variants else "all")
         self.logger.info("Modalities: %s", ",".join(self.cfg.modalities) if self.cfg.modalities else "all")
         self.logger.info("Algorithms: %s", ",".join(self.cfg.algorithms))
+        self.logger.info("Diffusion runtime profile: %s", self.cfg.diffusion_runtime_profile or "none")
+        self.logger.info("Experiment name override: %s", self.cfg.experiment_name or "none")
         self.logger.info("Workspace dir: %s", self.cfg.workspace_dir)
         self.logger.info("Run root: %s", self.cfg.run_root)
         self.logger.info("Data dir: %s", self.cfg.data_dir)
@@ -287,7 +292,13 @@ class Runner:
             base_dataset_dir=str(self.cfg.data_dir),
         )
 
-        experiment_name = f"core_{dataset_name}_{obs_modality}" if algo_name == "bc" else f"core_{dataset_name}_{obs_modality}_{algo_name}"
+        experiment_name = self.cfg.experiment_name
+        if not experiment_name:
+            experiment_name = (
+                f"core_{dataset_name}_{obs_modality}"
+                if algo_name == "bc"
+                else f"core_{dataset_name}_{obs_modality}_{algo_name}"
+            )
         with config.experiment.values_unlocked():
             config.experiment.name = experiment_name
         with config.train.values_unlocked():
@@ -302,9 +313,20 @@ class Runner:
 
         dir_to_save = self.cfg.core_train_config_dir / "core" / dataset_name / obs_modality / algo_name
         dir_to_save.mkdir(parents=True, exist_ok=True)
-        json_path = dir_to_save / file_name
+        profile_suffix = ""
+        if algo_name == "diffusion_policy" and self.cfg.diffusion_runtime_profile:
+            profile_suffix = f"_{self.cfg.diffusion_runtime_profile}"
+        json_path = dir_to_save / file_name.replace(".json", f"{profile_suffix}.json")
         config.dump(filename=str(json_path))
+        if algo_name == "diffusion_policy" and self.cfg.diffusion_runtime_profile:
+            self.apply_diffusion_runtime_profile(json_path)
         return str(json_path)
+
+    def apply_diffusion_runtime_profile(self, json_path: Path) -> None:
+        payload = json.loads(json_path.read_text(encoding="utf-8"))
+        payload = apply_runtime_profile_to_diffusion_payload(payload, self.cfg.diffusion_runtime_profile)
+        json_path.write_text(json.dumps(payload, indent=4) + "\n", encoding="utf-8")
+        self.logger.info("Applied diffusion runtime profile %s to %s", self.cfg.diffusion_runtime_profile, json_path)
 
     def configure_bc(self, config, obs_modality: str):
         with config.train.values_unlocked():
@@ -347,13 +369,13 @@ class Runner:
     def apply_low_dim_defaults(self, config) -> None:
         with config.experiment.values_unlocked():
             config.experiment.save.enabled = True
-            config.experiment.save.every_n_epochs = 50
+            config.experiment.save.every_n_epochs = 200
             config.experiment.epoch_every_n_steps = 100
             config.experiment.validation_epoch_every_n_steps = 10
             config.experiment.rollout.enabled = True
             config.experiment.rollout.n = 50
             config.experiment.rollout.horizon = 400
-            config.experiment.rollout.rate = 50
+            config.experiment.rollout.rate = 200
             config.experiment.rollout.warmstart = 0
             config.experiment.rollout.terminate_on_success = True
 
@@ -561,6 +583,17 @@ def parse_args(argv: Optional[list[str]] = None) -> Config:
         choices=ALGORITHMS,
         help="Training algorithm to generate configs for. Repeat to run multiple algorithms. Default: bc.",
     )
+    parser.add_argument(
+        "--diffusion-runtime-profile",
+        choices=available_runtime_profiles(),
+        default=os.environ.get("DIFFUSION_RUNTIME_PROFILE"),
+        help="Optional shared diffusion runtime profile to apply to diffusion_policy BC configs.",
+    )
+    parser.add_argument(
+        "--experiment-name",
+        default=os.environ.get("EXPERIMENT_NAME"),
+        help="Optional fixed robomimic experiment folder name. Requires exactly one variant, one modality, and one algorithm.",
+    )
     add_bool_arg(
         parser,
         "download-datasets",
@@ -577,6 +610,12 @@ def parse_args(argv: Optional[list[str]] = None) -> Config:
     variants = sorted({value.upper() for value in args.variants}) if args.variants else None
     modalities = sorted(set(args.modalities)) if args.modalities else None
     algorithms = sorted(set(args.algorithms)) if args.algorithms else ["bc"]
+    if args.experiment_name is not None:
+        if variants is None or len(variants) != 1 or modalities is None or len(modalities) != 1 or len(algorithms) != 1:
+            raise SystemExit(
+                "--experiment-name requires exactly one variant, one modality, and one algorithm "
+                "so the BC output folder name is unambiguous."
+            )
     if variants is not None:
         invalid_variants = sorted(set(variants) - set(TASK_VARIANTS[args.task]))
         if invalid_variants:
@@ -589,6 +628,8 @@ def parse_args(argv: Optional[list[str]] = None) -> Config:
         variants=variants,
         modalities=modalities,
         algorithms=algorithms,
+        diffusion_runtime_profile=args.diffusion_runtime_profile,
+        experiment_name=args.experiment_name,
         workspace_dir=workspace_dir,
         run_root=run_root,
         data_dir=data_dir.resolve(),

@@ -4,6 +4,7 @@ import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+from rl_mimicgen.diffusion_runtime import apply_runtime_profile_to_online_rl_config
 
 @dataclass
 class OptimizerConfig:
@@ -70,6 +71,7 @@ class RobosuiteConfig:
 @dataclass
 class DiffusionConfig:
     enabled: bool = True
+    runtime_profile: str | None = None
     num_inference_timesteps: int | None = None
     use_ema: bool = False
     ft_denoising_steps: int | None = None
@@ -104,7 +106,7 @@ class OnlineRLConfig:
     def from_json(cls, path: str | Path) -> "OnlineRLConfig":
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        return cls(
+        config = cls(
             **{
                 **data,
                 "optimizer": OptimizerConfig(**data.get("optimizer", {})),
@@ -116,6 +118,8 @@ class OnlineRLConfig:
                 "diffusion": DiffusionConfig(**data.get("diffusion", {})),
             }
         )
+        apply_runtime_profile_to_online_rl_config(config.diffusion)
+        return config
 
     def to_dict(self) -> dict:
         return asdict(self)
