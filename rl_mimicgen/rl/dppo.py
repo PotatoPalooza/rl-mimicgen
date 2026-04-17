@@ -103,17 +103,13 @@ class DiffusionPPO:
         early_stop = False
 
         num_decisions = batch.log_probs.shape[0]
-        num_denoising_steps = batch.log_probs.shape[1]
-        total_steps = num_decisions * num_denoising_steps
 
         for _ in range(self.num_learning_epochs):
-            flat_indices = torch.randperm(total_steps, device=self.device)
-            for batch_ids in torch.tensor_split(flat_indices, self.num_mini_batches):
-                if batch_ids.numel() == 0:
+            decision_indices = torch.randperm(num_decisions, device=self.device)
+            for batch_decision_ids in torch.tensor_split(decision_indices, self.num_mini_batches):
+                if batch_decision_ids.numel() == 0:
                     continue
-                decision_indices = torch.div(batch_ids, num_denoising_steps, rounding_mode="floor")
-                denoising_indices = torch.remainder(batch_ids, num_denoising_steps)
-                minibatch = self._slice_batch(batch, decision_indices, denoising_indices)
+                minibatch = self._slice_batch(batch, batch_decision_ids)
 
                 demo_loss = torch.zeros((), device=self.device)
                 if self.demo_batch_iterator is not None and self.demo_loss_fn is not None and self.demo_coef > 0.0:
@@ -185,7 +181,6 @@ class DiffusionPPO:
         self,
         batch: DiffusionRolloutBatch,
         decision_indices: torch.Tensor,
-        denoising_indices: torch.Tensor,
     ) -> dict[str, Any]:
         reward_horizon = self.policy.action_horizon
         action_start = self.policy.observation_horizon - 1
@@ -193,10 +188,10 @@ class DiffusionPPO:
         return {
             "observations": {key: value[decision_indices] for key, value in batch.observations.items()},
             "goals": None if batch.goals is None else {key: value[decision_indices] for key, value in batch.goals.items()},
-            "chain_prev": batch.chain_samples[decision_indices, denoising_indices, action_start:action_end],
-            "chain_next": batch.chain_next_samples[decision_indices, denoising_indices, action_start:action_end],
-            "timesteps": batch.chain_timesteps[decision_indices, denoising_indices],
-            "log_probs": batch.log_probs[decision_indices, denoising_indices],
+            "chain_prev": batch.chain_samples[decision_indices, :, action_start:action_end],
+            "chain_next": batch.chain_next_samples[decision_indices, :, action_start:action_end],
+            "timesteps": batch.chain_timesteps[decision_indices],
+            "log_probs": batch.log_probs[decision_indices],
             "returns": batch.returns[decision_indices],
             "advantages": batch.advantages[decision_indices],
         }

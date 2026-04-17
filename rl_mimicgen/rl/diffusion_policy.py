@@ -53,10 +53,10 @@ class DiffusionOnlinePolicyAdapter(nn.Module):
         self.num_inference_timesteps = int(
             num_inference_timesteps or getattr(bundle.config.algo.ddpm, "num_inference_timesteps")
         )
-        train_config = getattr(bundle.config, "train", None)
-        configured_ft_steps = getattr(train_config, "ft_denoising_steps", None)
+        train_config = _safe_getattr(bundle.config, "train", None)
+        configured_ft_steps = _safe_getattr(train_config, "ft_denoising_steps", None)
         if configured_ft_steps is None:
-            configured_ft_steps = getattr(bundle.config.algo, "ft_denoising_steps", None)
+            configured_ft_steps = _safe_getattr(bundle.config.algo, "ft_denoising_steps", None)
         if ft_denoising_steps is not None:
             configured_ft_steps = ft_denoising_steps
         self.ft_denoising_steps = None if configured_ft_steps is None else int(configured_ft_steps)
@@ -534,9 +534,22 @@ class DiffusionOnlinePolicyAdapter(nn.Module):
     ) -> torch.Tensor:
         obs_cond = self._encode_obs_history(obs_history=obs_history, goal_batch=goal_batch, use_ema=False)
         noise_pred_net = self._policy_nets(use_ema=False)["noise_pred_net"]
-        noise_pred = noise_pred_net(sample=chain_samples, timestep=chain_timesteps, global_cond=obs_cond)
-        mean, variance = _ddpm_reverse_stats(self.algo.noise_scheduler, noise_pred, chain_timesteps, chain_samples)
-        return _gaussian_log_prob_per_dim(chain_next_samples, mean, variance)
+        if chain_timesteps.ndim == 1:
+            noise_pred = noise_pred_net(sample=chain_samples, timestep=chain_timesteps, global_cond=obs_cond)
+            mean, variance = _ddpm_reverse_stats(self.algo.noise_scheduler, noise_pred, chain_timesteps, chain_samples)
+            return _gaussian_log_prob_per_dim(chain_next_samples, mean, variance)
+
+        batch_size, chain_len = chain_timesteps.shape
+        obs_cond = obs_cond.unsqueeze(1).expand(-1, chain_len, -1).reshape(batch_size * chain_len, -1)
+        flat_samples = chain_samples.reshape(batch_size * chain_len, chain_samples.shape[-2], chain_samples.shape[-1])
+        flat_next_samples = chain_next_samples.reshape(
+            batch_size * chain_len, chain_next_samples.shape[-2], chain_next_samples.shape[-1]
+        )
+        flat_timesteps = chain_timesteps.reshape(-1)
+        noise_pred = noise_pred_net(sample=flat_samples, timestep=flat_timesteps, global_cond=obs_cond)
+        mean, variance = _ddpm_reverse_stats(self.algo.noise_scheduler, noise_pred, flat_timesteps, flat_samples)
+        log_probs = _gaussian_log_prob_per_dim(flat_next_samples, mean, variance)
+        return log_probs.reshape(batch_size, chain_len, *chain_next_samples.shape[-2:])
 
 def _clone_history_state(state: Any) -> Any:
     if state is None:
@@ -548,6 +561,15 @@ def _clone_action_queues(queues: list[deque[torch.Tensor]] | None) -> list[deque
     if queues is None:
         return None
     return [deque([action.detach().clone() for action in queue], maxlen=queue.maxlen) for queue in queues]
+
+
+def _safe_getattr(obj: Any, name: str, default: Any = None) -> Any:
+    if obj is None:
+        return default
+    try:
+        return getattr(obj, name)
+    except (AttributeError, RuntimeError):
+        return default
 
 
 def _gaussian_log_prob(value: torch.Tensor, mean: torch.Tensor, variance: torch.Tensor) -> torch.Tensor:
