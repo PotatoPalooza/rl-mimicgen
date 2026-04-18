@@ -33,9 +33,9 @@
   "awac": {
     "dataset_path": "/home/nelly/projects/rl-mimicgen/runs/datasets/core/coffee_d1.hdf5",
     "discount": 0.99,
-    "beta": 0.25,
+    "beta": 0.1,
     "max_weight": 20.0,
-    "normalize_weights": true,
+    "normalize_weights": false,
     "actor_batch_size": 1024,
     "replay_capacity": 1000000,
     "q_hidden_sizes": [
@@ -44,13 +44,13 @@
     ],
     "num_q_networks": 2,
     "target_tau": 0.005,
-    "num_action_samples": 8,
+    "num_action_samples": 16,
     "critic_huber_loss": true,
     "value_coef": 1.0,
     "entropy_coef": 0.0,
     "update_epochs": 4,
     "num_minibatches": 8,
-    "critic_warmup_updates": 2,
+    "critic_warmup_updates": 10,
     "actor_freeze_env_steps": 8192
   },
   "demo": {
