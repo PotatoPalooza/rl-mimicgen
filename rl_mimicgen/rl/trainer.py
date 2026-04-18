@@ -5,6 +5,7 @@ import random
 from collections import OrderedDict
 from pathlib import Path
 
+import h5py
 import imageio
 import numpy as np
 import torch
@@ -13,11 +14,14 @@ from torch.utils.data import DataLoader
 from robomimic.utils.train_utils import dataset_factory
 
 from rl_mimicgen.rl.config import OnlineRLConfig
+from rl_mimicgen.rl.awac import AWAC
+from rl_mimicgen.rl.awac_policy import AWACPolicyAdapter
 from rl_mimicgen.rl.diffusion_policy import DiffusionOnlinePolicyAdapter
 from rl_mimicgen.rl.diffusion_storage import DiffusionRolloutStorage
 from rl_mimicgen.rl.dppo import DiffusionPPO
 from rl_mimicgen.rl.policy import OnlinePolicyAdapter, load_policy_bundle
 from rl_mimicgen.rl.ppo import DemoAugmentedPPO
+from rl_mimicgen.rl.replay_buffer import ReplayBuffer
 from rl_mimicgen.rl.robomimic_env import ParallelRobomimicVectorEnv, SerialRobomimicVectorEnv, make_robosuite_env_from_checkpoint
 from rl_mimicgen.rl.storage import RolloutStorage
 
@@ -34,7 +38,10 @@ class OnlineRLTrainer:
 
         self.bundle = load_policy_bundle(config.checkpoint_path, self.device)
         self.is_diffusion_policy = getattr(self.bundle.config, "algo_name", "") == "diffusion_policy"
+        self.algorithm_name = str(config.algorithm).lower()
         if self.is_diffusion_policy:
+            if self.algorithm_name != "dppo":
+                raise ValueError("Diffusion policies currently support only algorithm='dppo'.")
             if config.residual.enabled:
                 raise ValueError("Residual fine-tuning is not supported for diffusion policies.")
             self.policy = DiffusionOnlinePolicyAdapter(
@@ -50,20 +57,35 @@ class OnlineRLTrainer:
                 use_ema=config.diffusion.use_ema,
             )
         else:
-            self.policy = OnlinePolicyAdapter(
-                bundle=self.bundle,
-                device=self.device,
-                init_log_std=config.ppo.init_log_std,
-                min_log_std=config.ppo.min_log_std,
-                residual_enabled=config.residual.enabled,
-                residual_scale=config.residual.scale,
-            )
+            if self.algorithm_name == "awac":
+                self.policy = AWACPolicyAdapter(
+                    bundle=self.bundle,
+                    device=self.device,
+                    init_log_std=config.ppo.init_log_std,
+                    min_log_std=config.ppo.min_log_std,
+                    residual_enabled=config.residual.enabled,
+                    residual_scale=config.residual.scale,
+                    q_hidden_sizes=tuple(int(dim) for dim in config.awac.q_hidden_sizes),
+                    num_q_networks=config.awac.num_q_networks,
+                    target_tau=config.awac.target_tau,
+                    num_value_action_samples=config.awac.num_action_samples,
+                )
+            else:
+                self.policy = OnlinePolicyAdapter(
+                    bundle=self.bundle,
+                    device=self.device,
+                    init_log_std=config.ppo.init_log_std,
+                    min_log_std=config.ppo.min_log_std,
+                    residual_enabled=config.residual.enabled,
+                    residual_scale=config.residual.scale,
+                )
 
         self.env = self._build_vector_env()
         self.eval_env = self._build_eval_env(
             render=config.evaluation.render,
             render_offscreen=bool(config.evaluation.video_path),
         )
+        action_dim = int(np.prod(self.env.single_action_space.shape))
 
         self.demo_loader = None
         self.demo_iter = None
@@ -71,13 +93,16 @@ class OnlineRLTrainer:
             self.demo_loader = self._build_demo_loader()
             self.demo_iter = iter(self.demo_loader)
 
+        self.storage = None
+        self.replay_buffer = None
+
         if self.is_diffusion_policy:
             self.storage = DiffusionRolloutStorage(
                 rollout_steps=self.config.rollout_steps,
                 num_envs=self.config.num_envs,
                 obs_shapes=self.policy.obs_shapes,
                 goal_shapes=self.policy.goal_shapes,
-                action_dim=int(np.prod(self.env.single_action_space.shape)),
+                action_dim=action_dim,
                 prediction_horizon=self.policy.prediction_horizon,
                 chain_length=self.policy.num_inference_timesteps,
                 device=self.device,
@@ -103,33 +128,70 @@ class OnlineRLTrainer:
                 device=self.device,
             )
         else:
-            self.storage = RolloutStorage(
-                rollout_steps=self.config.rollout_steps,
-                num_envs=self.config.num_envs,
-                obs_shapes=self.policy.obs_shapes,
-                goal_shapes=self.policy.goal_shapes,
-                action_dim=int(np.prod(self.env.single_action_space.shape)),
-                device=self.device,
-            )
-            self.algorithm = DemoAugmentedPPO(
-                policy=self.policy,
-                demo_batch_iterator=self._demo_batch_generator() if self.config.demo.enabled else None,
-                demo_loss_fn=self.policy.demo_loss if self.config.demo.enabled else None,
-                demo_coef=self.config.demo.coef if self.config.demo.enabled else 0.0,
-                actor_learning_rate=self.config.optimizer.actor_lr,
-                critic_learning_rate=self.config.optimizer.value_lr,
-                weight_decay=self.config.optimizer.weight_decay,
-                critic_warmup_updates=self.config.ppo.critic_warmup_updates,
-                actor_freeze_env_steps=self.config.ppo.actor_freeze_env_steps,
-                num_learning_epochs=self.config.ppo.update_epochs,
-                num_mini_batches=self.config.ppo.num_minibatches,
-                clip_param=self.config.ppo.clip_ratio,
-                value_loss_coef=self.config.ppo.value_coef,
-                entropy_coef=self.config.ppo.entropy_coef,
-                target_kl=self.config.ppo.target_kl,
-                max_grad_norm=self.config.optimizer.max_grad_norm,
-                device=self.device,
-            )
+            demo_batch_iterator = self._demo_batch_generator() if self.config.demo.enabled else None
+            demo_loss_fn = self.policy.demo_loss if self.config.demo.enabled else None
+            if self.algorithm_name == "awac":
+                self.replay_buffer = ReplayBuffer(
+                    capacity=self.config.awac.replay_capacity,
+                    obs_shapes=self.policy.obs_shapes,
+                    goal_shapes=self.policy.goal_shapes,
+                    action_dim=action_dim,
+                )
+                self._load_awac_offline_data()
+                self.algorithm = AWAC(
+                    policy=self.policy,
+                    batch_size=self.config.awac.actor_batch_size,
+                    discount=self.config.awac.discount,
+                    demo_batch_iterator=demo_batch_iterator,
+                    demo_loss_fn=demo_loss_fn,
+                    demo_coef=self.config.demo.coef if self.config.demo.enabled else 0.0,
+                    actor_learning_rate=self.config.optimizer.actor_lr,
+                    critic_learning_rate=self.config.optimizer.value_lr,
+                    weight_decay=self.config.optimizer.weight_decay,
+                    critic_warmup_updates=self.config.awac.critic_warmup_updates,
+                    actor_freeze_env_steps=self.config.awac.actor_freeze_env_steps,
+                    num_learning_epochs=self.config.awac.update_epochs,
+                    num_mini_batches=self.config.awac.num_minibatches,
+                    beta=self.config.awac.beta,
+                    max_weight=self.config.awac.max_weight,
+                    normalize_weights=self.config.awac.normalize_weights,
+                    critic_loss_coef=self.config.awac.value_coef,
+                    entropy_coef=self.config.awac.entropy_coef,
+                    max_grad_norm=self.config.optimizer.max_grad_norm,
+                    critic_huber_loss=self.config.awac.critic_huber_loss,
+                    num_action_samples=self.config.awac.num_action_samples,
+                    device=self.device,
+                )
+            elif self.algorithm_name == "ppo":
+                self.storage = RolloutStorage(
+                    rollout_steps=self.config.rollout_steps,
+                    num_envs=self.config.num_envs,
+                    obs_shapes=self.policy.obs_shapes,
+                    goal_shapes=self.policy.goal_shapes,
+                    action_dim=action_dim,
+                    device=self.device,
+                )
+                self.algorithm = DemoAugmentedPPO(
+                    policy=self.policy,
+                    demo_batch_iterator=demo_batch_iterator,
+                    demo_loss_fn=demo_loss_fn,
+                    demo_coef=self.config.demo.coef if self.config.demo.enabled else 0.0,
+                    actor_learning_rate=self.config.optimizer.actor_lr,
+                    critic_learning_rate=self.config.optimizer.value_lr,
+                    weight_decay=self.config.optimizer.weight_decay,
+                    critic_warmup_updates=self.config.ppo.critic_warmup_updates,
+                    actor_freeze_env_steps=self.config.ppo.actor_freeze_env_steps,
+                    num_learning_epochs=self.config.ppo.update_epochs,
+                    num_mini_batches=self.config.ppo.num_minibatches,
+                    clip_param=self.config.ppo.clip_ratio,
+                    value_loss_coef=self.config.ppo.value_coef,
+                    entropy_coef=self.config.ppo.entropy_coef,
+                    target_kl=self.config.ppo.target_kl,
+                    max_grad_norm=self.config.optimizer.max_grad_norm,
+                    device=self.device,
+                )
+            else:
+                raise ValueError(f"Unsupported non-diffusion algorithm '{self.algorithm_name}'.")
 
         self.best_success = float("-inf")
         self.last_eval_metrics: dict[str, float] | None = None
@@ -140,6 +202,10 @@ class OnlineRLTrainer:
         self.config.dump_json(self.output_dir / "config.json")
 
     def train(self) -> None:
+        if self.algorithm_name == "awac":
+            self._train_awac()
+            return
+
         obs, _ = self.env.reset(seed=self.config.seed)
         goal = self._current_goal(self.env)
         running_returns = np.zeros(self.config.num_envs, dtype=np.float32)
@@ -159,8 +225,8 @@ class OnlineRLTrainer:
             if not self.is_diffusion_policy:
                 self.storage.set_initial_rnn_state(self.policy.clone_training_rollout_state())
 
-            rollout_env_steps = 0
-            while rollout_env_steps < self.config.rollout_steps:
+            rollout_step_count = 0
+            while rollout_step_count < self.config.rollout_steps:
                 if self.is_diffusion_policy:
                     env_actions, replan_data, completed_envs = self.policy.act(
                         obs=obs,
@@ -225,8 +291,9 @@ class OnlineRLTrainer:
                 obs = next_obs
                 goal = self._current_goal(self.env)
                 episode_starts = done
-                rollout_env_steps += self.config.num_envs
+                rollout_step_count += 1
 
+            rollout_env_steps = rollout_step_count * self.config.num_envs
             total_env_steps += rollout_env_steps
             self.algorithm.set_total_env_steps(total_env_steps)
             last_values = self.policy.predict_value(obs=obs, goal=goal)
@@ -254,6 +321,154 @@ class OnlineRLTrainer:
             train_metrics["success_rate_mean"] = float(np.mean(completed_success)) if completed_success else 0.0
             train_metrics["rollout_horizon"] = float(episode_horizon)
             train_metrics["env_steps"] = float(total_env_steps)
+            train_metrics["algorithm"] = 0.0 if self.algorithm_name == "ppo" else 1.0
+            for metric_name in (
+                "weight_mean",
+                "weight_std",
+                "weight_min",
+                "weight_max",
+                "weight_clipped_frac",
+                "advantage_mean",
+                "advantage_std",
+                "advantage_min",
+                "advantage_max",
+            ):
+                if metric_name in update_metrics:
+                    train_metrics[f"awac_{metric_name}"] = float(update_metrics[metric_name])
+            current_log_std = self.policy.current_log_std()
+            if current_log_std is not None:
+                train_metrics["log_std_mean"] = float(current_log_std.mean().item())
+                train_metrics["log_std_min"] = float(current_log_std.min().item())
+                train_metrics["log_std_max"] = float(current_log_std.max().item())
+
+            if self.config.evaluation.enabled and ((update + 1) % self.config.evaluation.every_n_updates == 0):
+                eval_metrics = self.evaluate(update)
+                self.last_eval_metrics = eval_metrics
+                train_metrics.update({f"eval/{k}": v for k, v in eval_metrics.items()})
+                train_metrics["eval/was_run"] = 1.0
+                if eval_metrics["success_rate"] > self.best_success:
+                    self.best_success = eval_metrics["success_rate"]
+                    self.save_best_checkpoint(update + 1, eval_metrics["success_rate"])
+            else:
+                train_metrics["eval/was_run"] = 0.0
+                if self.last_eval_metrics is not None:
+                    train_metrics["eval/last_success_rate"] = self.last_eval_metrics["success_rate"]
+                    train_metrics["eval/last_return_mean"] = self.last_eval_metrics["return_mean"]
+                    train_metrics["eval/last_length_mean"] = self.last_eval_metrics["length_mean"]
+                    train_metrics["eval/last_evaluated_episodes"] = self.last_eval_metrics["evaluated_episodes"]
+            train_metrics["eval/best_success_rate"] = self.best_success if self.best_success != float("-inf") else 0.0
+
+            self._log_metrics(train_metrics)
+
+            if (update + 1) % self.config.save_every_n_updates == 0:
+                self.save_checkpoint(tag=f"update_{update + 1:04d}")
+
+            self.current_demo_coef *= self.config.demo.decay
+
+        self.save_checkpoint(tag="latest")
+        self._close_env(self.env)
+        self._close_env(self.eval_env)
+
+    def _train_awac(self) -> None:
+        if self.replay_buffer is None:
+            raise RuntimeError("AWAC replay buffer was not initialized.")
+
+        obs, _ = self.env.reset(seed=self.config.seed)
+        goal = self._current_goal(self.env)
+        running_returns = np.zeros(self.config.num_envs, dtype=np.float32)
+        running_lengths = np.zeros(self.config.num_envs, dtype=np.float32)
+        episode_horizon = self._env_horizon()
+        total_env_steps = 0
+        episode_starts = np.ones(self.config.num_envs, dtype=bool)
+
+        for update in range(self.config.total_updates):
+            completed_returns = []
+            completed_lengths = []
+            completed_success = []
+
+            self.algorithm.train_mode()
+            self.algorithm.demo_coef = self.current_demo_coef
+
+            rollout_step_count = 0
+            while rollout_step_count < self.config.rollout_steps:
+                env_actions, policy_actions, _, _ = self.policy.act(
+                    obs=obs,
+                    goal=goal,
+                    episode_starts=episode_starts,
+                    clip_actions=self.config.ppo.clip_actions,
+                )
+                next_obs, rewards, terminated, truncated, infos = self.env.step(env_actions)
+                done = terminated | truncated
+                next_goal = self._current_goal(self.env)
+
+                self.replay_buffer.add_batch(
+                    obs=obs,
+                    actions=policy_actions,
+                    rewards=rewards,
+                    next_obs=next_obs,
+                    dones=done.astype(np.float32),
+                    goals=goal,
+                    next_goals=next_goal,
+                )
+
+                running_returns += rewards
+                running_lengths += 1
+
+                final_info = infos.get("final_info", [None] * self.config.num_envs)
+                for idx, info in enumerate(final_info):
+                    if info is None:
+                        continue
+                    completed_returns.append(float(running_returns[idx]))
+                    completed_lengths.append(float(running_lengths[idx]))
+                    completed_success.append(float(info.get("success", False)))
+                    running_returns[idx] = 0.0
+                    running_lengths[idx] = 0.0
+
+                obs = next_obs
+                goal = next_goal
+                episode_starts = done
+                rollout_step_count += 1
+
+            rollout_env_steps = rollout_step_count * self.config.num_envs
+            total_env_steps += rollout_env_steps
+            self.algorithm.set_total_env_steps(total_env_steps)
+
+            update_metrics = self.algorithm.update(self.replay_buffer)
+            train_metrics = {
+                "policy_loss": float(update_metrics["surrogate"]),
+                "value_loss": float(update_metrics["value"]),
+                "entropy": float(update_metrics["entropy"]),
+                "demo_loss": float(update_metrics["demo"]),
+                "demo_weight": float(self.current_demo_coef),
+                "approx_kl": float(update_metrics["approx_kl"]),
+                "ppo_early_stop": float(update_metrics["early_stop"]),
+                "effective_num_minibatches": float(update_metrics["effective_num_minibatches"]),
+                "replay_size": float(len(self.replay_buffer)),
+                "update": update,
+                "episodes_completed": float(len(completed_returns)),
+                "episode_return_mean": float(np.mean(completed_returns)) if completed_returns else 0.0,
+                "episode_length_mean": float(np.mean(completed_lengths)) if completed_lengths else 0.0,
+                "success_rate_mean": float(np.mean(completed_success)) if completed_success else 0.0,
+                "rollout_horizon": float(episode_horizon),
+                "env_steps": float(total_env_steps),
+                "algorithm": 1.0,
+            }
+            for metric_name in (
+                "weight_mean",
+                "weight_std",
+                "weight_min",
+                "weight_max",
+                "weight_clipped_frac",
+                "advantage_mean",
+                "advantage_std",
+                "advantage_min",
+                "advantage_max",
+                "q_pred_mean",
+                "target_q_mean",
+                "q_gap_mean",
+            ):
+                if metric_name in update_metrics:
+                    train_metrics[f"awac_{metric_name}"] = float(update_metrics[metric_name])
             current_log_std = self.policy.current_log_std()
             if current_log_std is not None:
                 train_metrics["log_std_mean"] = float(current_log_std.mean().item())
@@ -416,9 +631,11 @@ class OnlineRLTrainer:
         torch.save(self.policy.export_policy_artifact(self.config.checkpoint_path), policy_path)
 
         trainer_state = {
-            "ppo_state": self.algorithm.save(),
+            "algorithm_state": self.algorithm.save(),
             "actor_state": self.policy.actor.state_dict(),
-            "value_net": self.policy.value_net.state_dict(),
+            "value_net": self.policy.value_net.state_dict() if hasattr(self.policy, "value_net") else None,
+            "q_networks": [q_net.state_dict() for q_net in getattr(self.policy, "q_networks", [])],
+            "target_q_networks": [q_net.state_dict() for q_net in getattr(self.policy, "target_q_networks", [])],
             "learned_log_std": None
             if self.policy.learned_log_std is None
             else self.policy.learned_log_std.detach().cpu(),
@@ -435,9 +652,11 @@ class OnlineRLTrainer:
 
         torch.save(self.policy.export_policy_artifact(self.config.checkpoint_path), policy_path)
         trainer_state = {
-            "ppo_state": self.algorithm.save(),
+            "algorithm_state": self.algorithm.save(),
             "actor_state": self.policy.actor.state_dict(),
-            "value_net": self.policy.value_net.state_dict(),
+            "value_net": self.policy.value_net.state_dict() if hasattr(self.policy, "value_net") else None,
+            "q_networks": [q_net.state_dict() for q_net in getattr(self.policy, "q_networks", [])],
+            "target_q_networks": [q_net.state_dict() for q_net in getattr(self.policy, "target_q_networks", [])],
             "learned_log_std": None
             if self.policy.learned_log_std is None
             else self.policy.learned_log_std.detach().cpu(),
@@ -457,6 +676,7 @@ class OnlineRLTrainer:
         dataset_path = self.config.demo.dataset_path or self.bundle.config.train.data
         if dataset_path is None:
             raise ValueError("Demo regularization was enabled, but no dataset path was found in the checkpoint or config.")
+        self._ensure_demo_dataset_config_defaults()
         dataset = dataset_factory(
             config=self.bundle.config,
             obs_keys=self.bundle.config.all_obs_keys,
@@ -469,6 +689,92 @@ class OnlineRLTrainer:
             num_workers=0,
             drop_last=True,
         )
+
+    def _load_awac_offline_data(self) -> None:
+        if self.replay_buffer is None:
+            raise RuntimeError("Replay buffer must exist before loading offline AWAC data.")
+        dataset_path = self._resolve_awac_dataset_path()
+        if dataset_path is None:
+            raise ValueError("AWAC requires an offline dataset path to seed replay.")
+        dataset_path = Path(dataset_path).expanduser().resolve()
+        if not dataset_path.exists():
+            raise FileNotFoundError(f"AWAC dataset path does not exist: {dataset_path}")
+
+        transitions_loaded = 0
+        with h5py.File(dataset_path, "r") as dataset_file:
+            data_group = dataset_file["data"]
+            for demo_name in data_group.keys():
+                demo_group = data_group[demo_name]
+                actions = np.asarray(demo_group["actions"], dtype=np.float32)
+                rewards = np.asarray(demo_group["rewards"], dtype=np.float32)
+                dones = np.asarray(demo_group["dones"], dtype=np.float32)
+                obs_group = demo_group["obs"]
+                observations = {
+                    key: np.asarray(obs_group[key], dtype=np.float32)
+                    for key in self.policy.obs_shapes
+                    if key in obs_group
+                }
+                missing_obs = [key for key in self.policy.obs_shapes if key not in observations]
+                if missing_obs:
+                    raise KeyError(f"Offline dataset is missing observation keys required by policy: {missing_obs}")
+
+                next_observations = {}
+                for key, value in observations.items():
+                    shifted = np.zeros_like(value)
+                    if value.shape[0] > 1:
+                        shifted[:-1] = value[1:]
+                    shifted[-1] = value[-1]
+                    next_observations[key] = shifted
+
+                self.replay_buffer.add_batch(
+                    obs=observations,
+                    actions=actions,
+                    rewards=rewards,
+                    next_obs=next_observations,
+                    dones=dones,
+                    goals=None,
+                    next_goals=None,
+                )
+                transitions_loaded += actions.shape[0]
+
+        self._emit(f"[awac] loaded_offline_transitions={transitions_loaded} replay_size={len(self.replay_buffer)}")
+
+    def _resolve_awac_dataset_path(self) -> str | None:
+        if self.config.awac.dataset_path is not None:
+            return self.config.awac.dataset_path
+        if self.config.demo.dataset_path is not None:
+            return self.config.demo.dataset_path
+        data_value = getattr(self.bundle.config.train, "data", None)
+        if isinstance(data_value, str):
+            return data_value
+        if isinstance(data_value, (list, tuple)) and data_value:
+            first_entry = data_value[0]
+            if isinstance(first_entry, dict):
+                return first_entry.get("path")
+            return str(first_entry)
+        return None
+
+    def _ensure_demo_dataset_config_defaults(self) -> None:
+        train_cfg = self.bundle.config.train
+        with self.bundle.config.unlocked():
+            data_value = getattr(train_cfg, "data", None)
+            if isinstance(data_value, str):
+                train_cfg.data = [{"path": data_value, "weight": 1.0}]
+            elif isinstance(data_value, tuple):
+                train_cfg.data = list(data_value)
+            if "dataset_keys" not in train_cfg:
+                train_cfg.dataset_keys = ("actions", "rewards", "dones")
+            if "action_keys" not in train_cfg:
+                train_cfg.action_keys = ["actions"]
+            if "action_config" not in train_cfg:
+                train_cfg.action_config = {
+                    "actions": {
+                        "normalization": None,
+                        "rot_conversion": None,
+                    }
+                }
+            if "normalize_weights_by_ds_size" not in train_cfg:
+                train_cfg.normalize_weights_by_ds_size = False
 
     def _next_demo_batch(self) -> dict:
         assert self.demo_iter is not None

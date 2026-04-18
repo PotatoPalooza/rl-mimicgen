@@ -32,6 +32,28 @@ class PPOConfig:
 
 
 @dataclass
+class AWACConfig:
+    dataset_path: str | None = None
+    discount: float = 0.99
+    beta: float = 1.0
+    max_weight: float = 20.0
+    normalize_weights: bool = True
+    actor_batch_size: int = 256
+    replay_capacity: int = 500000
+    q_hidden_sizes: tuple[int, ...] = (256, 256)
+    num_q_networks: int = 2
+    target_tau: float = 0.005
+    num_action_samples: int = 4
+    critic_huber_loss: bool = False
+    value_coef: float = 1.0
+    entropy_coef: float = 0.0
+    update_epochs: int = 4
+    num_minibatches: int = 4
+    critic_warmup_updates: int = 0
+    actor_freeze_env_steps: int = 8192
+
+
+@dataclass
 class DemoConfig:
     enabled: bool = True
     batch_size: int = 16
@@ -89,6 +111,7 @@ class OnlineRLConfig:
     output_dir: str = "logs/online_rl"
     device: str = "cuda"
     seed: int = 0
+    algorithm: str = "ppo"
     total_updates: int = 50
     num_envs: int = 8
     rollout_steps: int = 128
@@ -96,6 +119,7 @@ class OnlineRLConfig:
     save_every_n_updates: int = 10
     optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
     ppo: PPOConfig = field(default_factory=PPOConfig)
+    awac: AWACConfig = field(default_factory=AWACConfig)
     demo: DemoConfig = field(default_factory=DemoConfig)
     residual: ResidualConfig = field(default_factory=ResidualConfig)
     evaluation: EvalConfig = field(default_factory=EvalConfig)
@@ -111,6 +135,7 @@ class OnlineRLConfig:
                 **data,
                 "optimizer": OptimizerConfig(**data.get("optimizer", {})),
                 "ppo": PPOConfig(**data.get("ppo", {})),
+                "awac": AWACConfig(**data.get("awac", {})),
                 "demo": DemoConfig(**data.get("demo", {})),
                 "residual": ResidualConfig(**data.get("residual", {})),
                 "evaluation": EvalConfig(**data.get("evaluation", {})),
@@ -118,6 +143,9 @@ class OnlineRLConfig:
                 "diffusion": DiffusionConfig(**data.get("diffusion", {})),
             }
         )
+        config.algorithm = str(config.algorithm).lower()
+        if config.algorithm not in {"ppo", "awac", "dppo"}:
+            raise ValueError(f"Unsupported online RL algorithm '{config.algorithm}'.")
         apply_runtime_profile_to_online_rl_config(config.diffusion)
         return config
 

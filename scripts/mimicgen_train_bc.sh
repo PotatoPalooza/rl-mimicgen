@@ -14,6 +14,9 @@ Options:
   --variant NAME              Limit to a specific variant. Repeatable.
   --modality NAME             Limit to a specific modality. Repeatable. Default: low_dim,image
   --algo NAME                 Training algorithm. Repeatable. Default: bc. Supported: bc,diffusion_policy
+  --diffusion-runtime-profile NAME
+                              Optional shared diffusion runtime profile for diffusion_policy configs.
+  --experiment-name NAME     Optional fixed robomimic experiment folder name. Requires one variant, one modality, and one algo.
   --max-parallel N            Maximum concurrent jobs. Default: 2
   --run-root-base PATH        Base directory for per-job run roots.
   --data-dir PATH             Shared dataset directory.
@@ -101,6 +104,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --algo)
       REQUESTED_ALGOS+=("$2")
+      shift 2
+      ;;
+    --diffusion-runtime-profile)
+      RUNNER_FLAGS+=("$1" "$2")
+      shift 2
+      ;;
+    --experiment-name)
+      RUNNER_FLAGS+=("$1" "$2")
       shift 2
       ;;
     --max-parallel)

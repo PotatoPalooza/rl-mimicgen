@@ -15,6 +15,7 @@ class RolloutBatch:
     log_probs: torch.Tensor
     returns: torch.Tensor
     advantages: torch.Tensor
+    raw_advantages: torch.Tensor | None
     values: torch.Tensor
     rewards: torch.Tensor
     dones: torch.Tensor
@@ -109,8 +110,8 @@ class RolloutStorage:
             next_value = self.values[step]
 
     def as_batch(self) -> RolloutBatch:
-        advantages = self.advantages.reshape(-1)
-        advantages = (advantages - advantages.mean()) / (advantages.std(unbiased=False) + 1e-8)
+        raw_advantages = self.advantages.reshape(-1)
+        advantages = (raw_advantages - raw_advantages.mean()) / (raw_advantages.std(unbiased=False) + 1e-8)
         return RolloutBatch(
             observations={key: value for key, value in self.observations.items()},
             goals={key: value for key, value in self.goals.items()} if self.goals else None,
@@ -118,6 +119,7 @@ class RolloutStorage:
             log_probs=self.log_probs.reshape(-1),
             returns=self.returns.reshape(-1),
             advantages=advantages,
+            raw_advantages=raw_advantages,
             values=self.values.reshape(-1),
             rewards=self.rewards.reshape(-1),
             dones=self.dones.reshape(-1),

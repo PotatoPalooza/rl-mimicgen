@@ -220,6 +220,7 @@ def _detach_rollout_batch(batch: RolloutBatch) -> RolloutBatch:
         log_probs=batch.log_probs.detach(),
         returns=batch.returns.detach(),
         advantages=batch.advantages.detach(),
+        raw_advantages=None if batch.raw_advantages is None else batch.raw_advantages.detach(),
         values=batch.values.detach(),
         rewards=batch.rewards.detach(),
         dones=batch.dones.detach(),

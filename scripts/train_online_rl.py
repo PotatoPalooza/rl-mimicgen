@@ -3,14 +3,15 @@ import argparse
 from rl_mimicgen.rl import OnlineRLConfig, OnlineRLTrainer
 
 
-def main() -> None:
+def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Online PPO / DPPO fine-tuning for robomimic checkpoints.")
     parser.add_argument("--config", type=str, default=None, help="Path to a JSON config file.")
+    parser.add_argument("--algorithm", type=str, choices=["ppo", "awac", "dppo"], default=None, help="Online RL algorithm to run.")
     parser.add_argument("--checkpoint", type=str, default=None, help="Path to a robomimic checkpoint.")
     parser.add_argument("--output_dir", type=str, default=None, help="Directory to write logs and checkpoints.")
     parser.add_argument("--num_envs", type=int, default=None, help="Number of parallel robosuite environments.")
     parser.add_argument("--total_updates", type=int, default=None, help="Number of PPO updates to run.")
-    parser.add_argument("--rollout_steps", type=int, default=None, help="Number of environment steps per PPO rollout.")
+    parser.add_argument("--rollout_steps", type=int, default=None, help="Number of policy time steps to collect per rollout update.")
     parser.add_argument("--actor_lr", type=float, default=None, help="Actor learning rate.")
     parser.add_argument("--value_lr", type=float, default=None, help="Critic learning rate.")
     parser.add_argument("--entropy_coef", type=float, default=None, help="Entropy bonus coefficient.")
@@ -39,9 +40,21 @@ def main() -> None:
     parser.add_argument("--diffusion_use_ema", action="store_true", help="Use the diffusion checkpoint EMA weights for deterministic evaluation. PPO training rollouts always use the live actor weights.")
     parser.add_argument("--residual", action="store_true", help="Enable residual policy fine-tuning on top of the BC checkpoint.")
     parser.add_argument("--residual_scale", type=float, default=None, help="Scale factor applied to residual actions before adding to the frozen BC action.")
-    args = parser.parse_args()
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help=(
+            "Increase run visibility by logging every update, evaluating every update, "
+            "and writing eval videos by default."
+        ),
+    )
+    return parser.parse_args()
 
+
+def apply_cli_overrides(args: argparse.Namespace) -> OnlineRLConfig:
     config = OnlineRLConfig.from_json(args.config) if args.config is not None else OnlineRLConfig()
+    if args.algorithm is not None:
+        config.algorithm = args.algorithm
     if args.checkpoint is not None:
         config.checkpoint_path = args.checkpoint
     if args.output_dir is not None:
@@ -78,6 +91,18 @@ def main() -> None:
         config.residual.enabled = True
     if args.residual_scale is not None:
         config.residual.scale = args.residual_scale
+    if args.debug:
+        config.log_every_n_updates = 1
+        config.evaluation.enabled = True
+        config.evaluation.every_n_updates = 1
+        if config.evaluation.video_path is None:
+            config.evaluation.video_path = "videos/debug_eval_update_{update:04d}.mp4"
+    return config
+
+
+def main() -> None:
+    args = parse_args()
+    config = apply_cli_overrides(args)
 
     trainer = OnlineRLTrainer(config)
     trainer.train()
