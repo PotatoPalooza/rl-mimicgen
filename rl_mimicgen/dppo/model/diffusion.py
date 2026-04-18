@@ -117,6 +117,17 @@ class DiffusionModel(nn.Module):
         self.register_buffer("sqrt_one_minus_alphas_cumprod", torch.sqrt(1.0 - alphas_cumprod))
         self.register_buffer("sqrt_recip_alphas_cumprod", torch.sqrt(1.0 / alphas_cumprod))
         self.register_buffer("sqrt_recipm1_alphas_cumprod", torch.sqrt(1.0 / alphas_cumprod - 1))
+        alphas_cumprod_prev = torch.cat([torch.ones(1, dtype=alphas_cumprod.dtype), alphas_cumprod[:-1]])
+        ddpm_var = self.betas * (1.0 - alphas_cumprod_prev) / (1.0 - alphas_cumprod)
+        self.register_buffer("ddpm_logvar_clipped", torch.log(torch.clamp(ddpm_var, min=1e-20)))
+        self.register_buffer(
+            "ddpm_mu_coef1",
+            self.betas * torch.sqrt(alphas_cumprod_prev) / (1.0 - alphas_cumprod),
+        )
+        self.register_buffer(
+            "ddpm_mu_coef2",
+            (1.0 - alphas_cumprod_prev) * torch.sqrt(alphas) / (1.0 - alphas_cumprod),
+        )
 
     def q_sample(self, x_start: torch.Tensor, timesteps: torch.Tensor, noise: torch.Tensor | None = None) -> torch.Tensor:
         if noise is None:
@@ -138,3 +149,53 @@ class DiffusionModel(nn.Module):
         batch_size = actions.shape[0]
         timesteps = torch.randint(0, self.denoising_steps, (batch_size,), device=actions.device, dtype=torch.long)
         return self.p_losses(actions, conditions, timesteps)
+
+    def p_mean_var(self, x: torch.Tensor, timesteps: torch.Tensor, cond: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
+        prediction = self.network(x, timesteps, cond=cond)
+        if self.predict_epsilon:
+            x_recon = (
+                extract(self.sqrt_recip_alphas_cumprod, timesteps, x.shape) * x
+                - extract(self.sqrt_recipm1_alphas_cumprod, timesteps, x.shape) * prediction
+            )
+        else:
+            x_recon = prediction
+        if self.denoised_clip_value is not None:
+            x_recon = x_recon.clamp(-self.denoised_clip_value, self.denoised_clip_value)
+        mu = (
+            extract(self.ddpm_mu_coef1, timesteps, x.shape) * x_recon
+            + extract(self.ddpm_mu_coef2, timesteps, x.shape) * x
+        )
+        logvar = extract(self.ddpm_logvar_clipped, timesteps, x.shape)
+        return mu, logvar
+
+    @torch.no_grad()
+    def sample(
+        self,
+        cond: dict[str, torch.Tensor],
+        deterministic: bool = True,
+        return_chain: bool = False,
+    ) -> DPPOSample:
+        device = self.betas.device
+        sample_data = cond["state"]
+        batch_size = int(sample_data.shape[0])
+        x = torch.randn((batch_size, self.horizon_steps, self.action_dim), device=device)
+        chains = [x.detach().clone()] if return_chain else None
+        for timestep in reversed(range(self.denoising_steps)):
+            t_batch = torch.full((batch_size,), timestep, device=device, dtype=torch.long)
+            mean, logvar = self.p_mean_var(x=x, timesteps=t_batch, cond=cond)
+            if deterministic or timestep == 0:
+                noise = torch.zeros_like(x)
+            else:
+                noise = torch.randn_like(x)
+            std = torch.exp(0.5 * logvar)
+            x = mean + std * noise
+            if self.denoised_clip_value is not None and timestep == 0:
+                x = x.clamp(-self.denoised_clip_value, self.denoised_clip_value)
+            if return_chain:
+                chains.append(x.detach().clone())
+        chain_tensor = torch.stack(chains, dim=1) if return_chain and chains is not None else None
+        return DPPOSample(trajectories=x, chains=chain_tensor)
+
+    @torch.no_grad()
+    def forward(self, cond: dict[str, torch.Tensor], deterministic: bool = True, return_chain: bool = False) -> DPPOSample:
+        return self.sample(cond=cond, deterministic=deterministic, return_chain=return_chain)

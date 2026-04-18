@@ -36,6 +36,15 @@ class DPPONormalizationStats:
             action_range=np.asarray(stats["action_range"], dtype=np.float32),
         )
 
+    def normalize_obs(self, obs: np.ndarray) -> np.ndarray:
+        return (2.0 * (obs - self.obs_min) / self.obs_range) - 1.0
+
+    def normalize_action(self, action: np.ndarray) -> np.ndarray:
+        return (2.0 * (action - self.action_min) / self.action_range) - 1.0
+
+    def unnormalize_action(self, action: np.ndarray) -> np.ndarray:
+        return ((action + 1.0) * 0.5 * self.action_range) + self.action_min
+
 
 @dataclass(frozen=True, slots=True)
 class DPPODatasetBundle:
@@ -83,3 +92,10 @@ class DPPODatasetBundle:
             f"demos={self.metadata['num_demos']} transitions={self.metadata['num_transitions']} "
             f"obs_dim={self.obs_dim} action_dim={self.action_dim}"
         )
+
+    def flatten_obs(self, obs_dict: dict[str, np.ndarray]) -> np.ndarray:
+        chunks = []
+        for key in self.metadata["obs_keys"]:
+            value = np.asarray(obs_dict[key], dtype=np.float32).reshape(-1)
+            chunks.append(value)
+        return np.concatenate(chunks, axis=0)

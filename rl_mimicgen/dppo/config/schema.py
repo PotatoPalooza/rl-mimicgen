@@ -18,6 +18,7 @@ class DPPODatasetConfig:
 @dataclass
 class DPPODiffusionConfig:
     horizon_steps: int = 4
+    act_steps: int = 4
     cond_steps: int = 1
     denoising_steps: int = 20
     predict_epsilon: bool = True
