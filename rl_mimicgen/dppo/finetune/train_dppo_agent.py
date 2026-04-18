@@ -15,6 +15,52 @@ from rl_mimicgen.dppo.online import DiffusionPPO, DiffusionRolloutStorage
 from rl_mimicgen.dppo.policy import DiffusionPolicyAdapter
 
 
+def _load_existing_metrics(
+    metrics_path: Path,
+    resume: bool,
+    max_update_index: int | None = None,
+) -> list[dict[str, object]]:
+    if not resume or not metrics_path.exists():
+        return []
+    with open(metrics_path, "r", encoding="utf-8") as file_obj:
+        payload = json.load(file_obj)
+    if not isinstance(payload, list):
+        raise RuntimeError(f"Expected list payload in {metrics_path}, found {type(payload).__name__}.")
+    if max_update_index is None:
+        return payload
+    return [entry for entry in payload if int(entry.get("update_index", -1)) <= max_update_index]
+
+
+def _restore_algorithm_state(
+    algorithm: DiffusionPPO,
+    checkpoint_path: str,
+) -> tuple[int, int]:
+    checkpoint = torch.load(checkpoint_path, map_location=algorithm.device, weights_only=False)
+    optimizer_state = checkpoint.get("optimizer")
+    if optimizer_state is None:
+        return 0, 0
+    algorithm.load(optimizer_state)
+    return algorithm.update_step, algorithm.total_env_steps
+
+
+def _save_training_checkpoint(
+    checkpoint_path: Path,
+    policy: DiffusionPolicyAdapter,
+    algorithm: DiffusionPPO,
+    config: DPPORunConfig,
+) -> None:
+    torch.save(
+        {
+            "actor": policy.actor.state_dict(),
+            "ema_actor": policy.ema_actor.state_dict(),
+            "critic": policy.value_net.state_dict(),
+            "optimizer": algorithm.save(),
+            "config": config.to_dict(),
+        },
+        checkpoint_path,
+    )
+
+
 def build_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Online DPPO fine-tuning entry point.")
     parser.add_argument("--config", required=True, help="Path to the DPPO JSON config.")
@@ -23,6 +69,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--total_updates", type=int, default=1, help="Number of rollout / update iterations to run.")
     parser.add_argument("--eval_every", type=int, default=1, help="Run evaluation every N updates.")
     parser.add_argument("--output_dir", default=None, help="Directory to write rollout artifacts.")
+    parser.add_argument("--resume", action="store_true", help="Resume from a local finetune checkpoint and append metrics in the output dir.")
     parser.add_argument("--smoke_env_reset", action="store_true", help="Create the low-dim env and run a reset during dry-run validation.")
     parser.add_argument("--dry_run", action="store_true", help="Load config and exit without fine-tuning.")
     return parser
@@ -83,13 +130,25 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_dir = output_dir / "checkpoints"
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    metrics_path = output_dir / "rollout_metrics.json"
+
+    completed_updates, total_env_steps = _restore_algorithm_state(algorithm, checkpoint_path) if args.resume else (0, 0)
+    all_metrics: list[dict[str, object]] = _load_existing_metrics(metrics_path, resume=args.resume, max_update_index=completed_updates)
+    if completed_updates >= args.total_updates:
+        print(
+            f"resume_noop completed_updates={completed_updates} total_updates={args.total_updates} "
+            f"checkpoint={checkpoint_path}"
+        )
+        env.close()
+        if not metrics_path.exists():
+            with open(metrics_path, "w", encoding="utf-8") as file_obj:
+                json.dump(all_metrics, file_obj, indent=2)
+        return
 
     obs = env.reset()
     episode_starts = np.ones(1, dtype=bool)
-    total_env_steps = 0
-    all_metrics: list[dict[str, object]] = []
     last_batch = None
-    for update_index in range(1, args.total_updates + 1):
+    for update_index in range(completed_updates + 1, args.total_updates + 1):
         storage.reset()
         rollout_env_steps = 0
         rewards_log: list[float] = []
@@ -161,17 +220,9 @@ def main() -> None:
             metrics["eval"] = eval_metrics
         all_metrics.append(metrics)
         print(json.dumps(metrics, indent=2))
-
-        torch.save(
-            {
-                "actor": policy.actor.state_dict(),
-                "ema_actor": policy.ema_actor.state_dict(),
-                "critic": policy.value_net.state_dict(),
-                "optimizer": algorithm.save(),
-                "config": config.to_dict(),
-            },
-            checkpoint_dir / f"state_{update_index}.pt",
-        )
+        _save_training_checkpoint(checkpoint_dir / f"state_{update_index}.pt", policy=policy, algorithm=algorithm, config=config)
+        with open(metrics_path, "w", encoding="utf-8") as file_obj:
+            json.dump(all_metrics, file_obj, indent=2)
 
     env.close()
     if last_batch is not None:
@@ -183,8 +234,9 @@ def main() -> None:
             rewards=last_batch.rewards.detach().cpu().numpy(),
             dones=last_batch.dones.detach().cpu().numpy(),
         )
-    with open(output_dir / "rollout_metrics.json", "w", encoding="utf-8") as file_obj:
-        json.dump(all_metrics, file_obj, indent=2)
+    if not metrics_path.exists():
+        with open(metrics_path, "w", encoding="utf-8") as file_obj:
+            json.dump(all_metrics, file_obj, indent=2)
 
 
 if __name__ == "__main__":

@@ -8,6 +8,7 @@ import torch
 
 from rl_mimicgen.dppo.config.schema import DPPODiffusionConfig, DPPODatasetConfig, DPPOOnlineConfig, DPPORunConfig, DPPOTrainConfig
 from rl_mimicgen.dppo.data.dataset import DPPODatasetBundle, DPPONormalizationStats
+from rl_mimicgen.dppo.finetune.train_dppo_agent import _load_existing_metrics, _restore_algorithm_state, _save_training_checkpoint
 from rl_mimicgen.dppo.model import DiffusionModel
 from rl_mimicgen.dppo.online import DiffusionPPO, DiffusionRolloutStorage
 from rl_mimicgen.dppo.policy import DiffusionPolicyAdapter
@@ -261,3 +262,58 @@ def test_dppo_algorithm_slice_batch_preserves_full_horizon_when_act_steps_is_sho
 
     assert sliced["chain_prev"].shape[2] == config.diffusion.horizon_steps
     assert sliced["chain_next"].shape[2] == config.diffusion.horizon_steps
+
+
+def test_dppo_finetune_helpers_resume_optimizer_state_and_metrics(tmp_path) -> None:
+    config = _make_config()
+    bundle = _make_bundle()
+    checkpoint_path = _make_checkpoint(tmp_path, config, bundle)
+    policy = DiffusionPolicyAdapter(config=config, bundle=bundle, checkpoint_path=checkpoint_path, deterministic=False)
+    algorithm = DiffusionPPO(
+        policy=policy,
+        actor_learning_rate=config.online.actor_learning_rate,
+        critic_learning_rate=config.online.critic_learning_rate,
+        num_learning_epochs=config.online.update_epochs,
+        num_mini_batches=config.online.num_minibatches,
+        clip_param=config.online.clip_ratio,
+        value_loss_coef=config.online.value_loss_coef,
+        gamma_denoising=config.online.gamma_denoising,
+        act_steps=config.diffusion.act_steps,
+        max_grad_norm=config.online.max_grad_norm,
+        device=config.device,
+    )
+    algorithm.set_total_env_steps(17)
+    algorithm.update_step = 3
+
+    output_dir = tmp_path / "resume_run"
+    output_dir.mkdir()
+    metrics_path = output_dir / "rollout_metrics.json"
+    metrics_path.write_text('[{"update_index": 1}, {"update_index": 4}]', encoding="utf-8")
+    resumed_checkpoint = output_dir / "state_3.pt"
+    _save_training_checkpoint(resumed_checkpoint, policy=policy, algorithm=algorithm, config=config)
+
+    resumed_policy = DiffusionPolicyAdapter(config=config, bundle=bundle, checkpoint_path=str(resumed_checkpoint), deterministic=False)
+    resumed_algorithm = DiffusionPPO(
+        policy=resumed_policy,
+        actor_learning_rate=config.online.actor_learning_rate,
+        critic_learning_rate=config.online.critic_learning_rate,
+        num_learning_epochs=config.online.update_epochs,
+        num_mini_batches=config.online.num_minibatches,
+        clip_param=config.online.clip_ratio,
+        value_loss_coef=config.online.value_loss_coef,
+        gamma_denoising=config.online.gamma_denoising,
+        act_steps=config.diffusion.act_steps,
+        max_grad_norm=config.online.max_grad_norm,
+        device=config.device,
+    )
+
+    completed_updates, total_env_steps = _restore_algorithm_state(resumed_algorithm, str(resumed_checkpoint))
+    resumed_metrics = _load_existing_metrics(metrics_path, resume=True, max_update_index=completed_updates)
+    fresh_metrics = _load_existing_metrics(metrics_path, resume=False)
+
+    assert completed_updates == 3
+    assert total_env_steps == 17
+    assert resumed_algorithm.update_step == 3
+    assert resumed_algorithm.total_env_steps == 17
+    assert resumed_metrics == [{"update_index": 1}]
+    assert fresh_metrics == []
