@@ -1,5 +1,5 @@
 {
-  "checkpoint_path": "/home/nelly/projects/mimicgen/reproduction_runs/paper_bc_public_parallel/coffee/core_training_results/bc_rnn_low_dim_ds_coffee_D1_seed_101/20260309080112/models/model_epoch_450_Coffee_D1_success_0.9.pth",
+  "checkpoint_path": "/home/eric/projects/rl-mimicgen/data/bc-models/model_epoch_450_Coffee_D1_success_0.9.pth",
   "output_dir": "logs/online_rl_coffee_awac_refactor_big",
   "device": "cuda",
   "seed": 0,
@@ -31,7 +31,7 @@
     "actor_freeze_env_steps": 8192
   },
   "awac": {
-    "dataset_path": "/home/nelly/projects/rl-mimicgen/runs/datasets/core/coffee_d1.hdf5",
+    "dataset_path": "/home/eric/projects/rl-mimicgen/datasets/core/coffee_d1.hdf5",
     "discount": 0.99,
     "beta": 0.1,
     "max_weight": 20.0,
