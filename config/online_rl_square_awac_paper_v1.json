@@ -32,15 +32,13 @@
   },
   "awac": {
     "dataset_path": "/home/eric/projects/rl-mimicgen/datasets/core/square_d2.hdf5",
+    "offline_pretrain_updates": 50,
     "discount": 0.99,
     "beta": 0.3,
     "max_weight": 20.0,
     "normalize_weights": false,
-    "native_actor": true,
-    "actor_hidden_sizes": [
-      512,
-      512
-    ],
+    "native_actor": false,
+    "actor_hidden_sizes": null,
     "actor_fixed_std": false,
     "actor_init_std": 0.3,
     "actor_use_tanh": false,

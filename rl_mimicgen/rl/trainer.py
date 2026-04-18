@@ -413,12 +413,14 @@ class OnlineRLTrainer:
         if self.replay_buffer is None:
             raise RuntimeError("AWAC replay buffer was not initialized.")
 
+        total_env_steps = 0
+        self._run_awac_offline_pretrain(total_env_steps)
+
         obs, _ = self.env.reset(seed=self.config.seed)
         goal = self._current_goal(self.env)
         running_returns = np.zeros(self.config.num_envs, dtype=np.float32)
         running_lengths = np.zeros(self.config.num_envs, dtype=np.float32)
         episode_horizon = self._env_horizon()
-        total_env_steps = 0
         episode_starts = np.ones(self.config.num_envs, dtype=bool)
 
         for update in range(self.config.total_updates):
@@ -484,54 +486,20 @@ class OnlineRLTrainer:
             update_start_time = perf_counter()
             update_metrics = self.algorithm.update(self.replay_buffer)
             update_duration_sec = perf_counter() - update_start_time
-            train_metrics = {
-                "policy_loss": float(update_metrics["surrogate"]),
-                "value_loss": float(update_metrics["value"]),
-                "entropy": float(update_metrics["entropy"]),
-                "demo_loss": float(update_metrics["demo"]),
-                "demo_weight": float(self.current_demo_coef),
-                "approx_kl": float(update_metrics["approx_kl"]),
-                "ppo_early_stop": float(update_metrics["early_stop"]),
-                "effective_num_minibatches": float(update_metrics["effective_num_minibatches"]),
-                "replay_size": float(len(self.replay_buffer)),
-                "update": update,
-                "episodes_completed": float(len(completed_returns)),
-                "episode_return_mean": float(np.mean(completed_returns)) if completed_returns else 0.0,
-                "episode_length_mean": float(np.mean(completed_lengths)) if completed_lengths else 0.0,
-                "success_rate_mean": float(np.mean(completed_success)) if completed_success else 0.0,
-                "rollout_horizon": float(episode_horizon),
-                "env_steps": float(total_env_steps),
-                "algorithm": 1.0,
-                "timing/rollout_sec": rollout_duration_sec,
-                "timing/update_sec": update_duration_sec,
-                "timing/rollout_sps": float(rollout_env_steps) / rollout_duration_sec if rollout_duration_sec > 0.0 else 0.0,
-            }
-            for metric_name in (
-                "weight_mean",
-                "weight_std",
-                "weight_min",
-                "weight_max",
-                "weight_clipped_frac",
-                "advantage_mean",
-                "advantage_std",
-                "advantage_min",
-                "advantage_max",
-                "log_prob_mean",
-                "log_prob_std",
-                "log_prob_min",
-                "log_prob_max",
-                "behavior_kl",
-                "q_pred_mean",
-                "target_q_mean",
-                "q_gap_mean",
-            ):
-                if metric_name in update_metrics:
-                    train_metrics[f"awac_{metric_name}"] = float(update_metrics[metric_name])
-            current_log_std = self.policy.current_log_std()
-            if current_log_std is not None:
-                train_metrics["log_std_mean"] = float(current_log_std.mean().item())
-                train_metrics["log_std_min"] = float(current_log_std.min().item())
-                train_metrics["log_std_max"] = float(current_log_std.max().item())
+            train_metrics = self._build_awac_metrics(
+                update=update,
+                update_metrics=update_metrics,
+                total_env_steps=total_env_steps,
+                rollout_horizon=episode_horizon,
+                episodes_completed=float(len(completed_returns)),
+                episode_return_mean=float(np.mean(completed_returns)) if completed_returns else 0.0,
+                episode_length_mean=float(np.mean(completed_lengths)) if completed_lengths else 0.0,
+                success_rate_mean=float(np.mean(completed_success)) if completed_success else 0.0,
+                rollout_sec=rollout_duration_sec,
+                update_sec=update_duration_sec,
+                rollout_sps=float(rollout_env_steps) / rollout_duration_sec if rollout_duration_sec > 0.0 else 0.0,
+                offline_pretrain=0.0,
+            )
 
             if self.config.evaluation.enabled and ((update + 1) % self.config.evaluation.every_n_updates == 0):
                 eval_start_time = perf_counter()
@@ -564,6 +532,132 @@ class OnlineRLTrainer:
         self.save_checkpoint(tag="latest")
         self._close_env(self.env)
         self._close_env(self.eval_env)
+
+    def _run_awac_offline_pretrain(self, total_env_steps: int) -> None:
+        pretrain_updates = max(0, int(self.config.awac.offline_pretrain_updates))
+        if pretrain_updates == 0:
+            return
+
+        self._emit(f"[awac] offline_pretrain_updates={pretrain_updates}")
+        self.algorithm.set_total_env_steps(total_env_steps)
+        episode_horizon = self._env_horizon()
+        for update in range(pretrain_updates):
+            self.algorithm.train_mode()
+            self.algorithm.demo_coef = self.current_demo_coef
+
+            update_start_time = perf_counter()
+            update_metrics = self.algorithm.update(self.replay_buffer)
+            update_duration_sec = perf_counter() - update_start_time
+
+            train_metrics = self._build_awac_metrics(
+                update=update,
+                update_metrics=update_metrics,
+                total_env_steps=total_env_steps,
+                rollout_horizon=episode_horizon,
+                episodes_completed=0.0,
+                episode_return_mean=0.0,
+                episode_length_mean=0.0,
+                success_rate_mean=0.0,
+                rollout_sec=0.0,
+                update_sec=update_duration_sec,
+                rollout_sps=0.0,
+                offline_pretrain=1.0,
+            )
+
+            if self.config.evaluation.enabled and ((update + 1) % self.config.evaluation.every_n_updates == 0):
+                eval_start_time = perf_counter()
+                eval_metrics = self.evaluate(update)
+                eval_duration_sec = perf_counter() - eval_start_time
+                self.last_eval_metrics = eval_metrics
+                train_metrics.update({f"eval/{k}": v for k, v in eval_metrics.items()})
+                train_metrics["eval/was_run"] = 1.0
+                train_metrics["timing/eval_sec"] = eval_duration_sec
+                if eval_metrics["success_rate"] > self.best_success:
+                    self.best_success = eval_metrics["success_rate"]
+                    self.save_best_checkpoint(update + 1, eval_metrics["success_rate"])
+            else:
+                train_metrics["eval/was_run"] = 0.0
+                train_metrics["timing/eval_sec"] = 0.0
+                if self.last_eval_metrics is not None:
+                    train_metrics["eval/last_success_rate"] = self.last_eval_metrics["success_rate"]
+                    train_metrics["eval/last_return_mean"] = self.last_eval_metrics["return_mean"]
+                    train_metrics["eval/last_length_mean"] = self.last_eval_metrics["length_mean"]
+                    train_metrics["eval/last_evaluated_episodes"] = self.last_eval_metrics["evaluated_episodes"]
+            train_metrics["eval/best_success_rate"] = self.best_success if self.best_success != float("-inf") else 0.0
+
+            self._log_metrics(train_metrics)
+
+            if (update + 1) % self.config.save_every_n_updates == 0:
+                self.save_checkpoint(tag=f"offline_pretrain_{update + 1:04d}")
+
+            self.current_demo_coef *= self.config.demo.decay
+        self._emit("[awac] offline_pretrain_complete")
+
+    def _build_awac_metrics(
+        self,
+        update: int,
+        update_metrics: dict[str, float],
+        total_env_steps: int,
+        rollout_horizon: int,
+        episodes_completed: float,
+        episode_return_mean: float,
+        episode_length_mean: float,
+        success_rate_mean: float,
+        rollout_sec: float,
+        update_sec: float,
+        rollout_sps: float,
+        offline_pretrain: float,
+    ) -> dict[str, float]:
+        train_metrics = {
+            "policy_loss": float(update_metrics["surrogate"]),
+            "value_loss": float(update_metrics["value"]),
+            "entropy": float(update_metrics["entropy"]),
+            "demo_loss": float(update_metrics["demo"]),
+            "demo_weight": float(self.current_demo_coef),
+            "approx_kl": float(update_metrics["approx_kl"]),
+            "ppo_early_stop": float(update_metrics["early_stop"]),
+            "effective_num_minibatches": float(update_metrics["effective_num_minibatches"]),
+            "replay_size": float(len(self.replay_buffer)),
+            "update": update,
+            "episodes_completed": episodes_completed,
+            "episode_return_mean": episode_return_mean,
+            "episode_length_mean": episode_length_mean,
+            "success_rate_mean": success_rate_mean,
+            "rollout_horizon": float(rollout_horizon),
+            "env_steps": float(total_env_steps),
+            "algorithm": 1.0,
+            "timing/rollout_sec": rollout_sec,
+            "timing/update_sec": update_sec,
+            "timing/rollout_sps": rollout_sps,
+            "awac/offline_pretrain": offline_pretrain,
+        }
+        for metric_name in (
+            "weight_mean",
+            "weight_std",
+            "weight_min",
+            "weight_max",
+            "weight_clipped_frac",
+            "advantage_mean",
+            "advantage_std",
+            "advantage_min",
+            "advantage_max",
+            "log_prob_mean",
+            "log_prob_std",
+            "log_prob_min",
+            "log_prob_max",
+            "behavior_kl",
+            "q_pred_mean",
+            "target_q_mean",
+            "q_gap_mean",
+        ):
+            if metric_name in update_metrics:
+                train_metrics[f"awac_{metric_name}"] = float(update_metrics[metric_name])
+        current_log_std = self.policy.current_log_std()
+        if current_log_std is not None:
+            train_metrics["log_std_mean"] = float(current_log_std.mean().item())
+            train_metrics["log_std_min"] = float(current_log_std.min().item())
+            train_metrics["log_std_max"] = float(current_log_std.max().item())
+        return train_metrics
 
     def evaluate(self, update: int) -> dict[str, float]:
         saved_rollout_state = self.policy.clone_rollout_state()
