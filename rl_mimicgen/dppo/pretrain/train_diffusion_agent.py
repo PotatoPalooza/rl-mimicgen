@@ -9,6 +9,7 @@ import torch
 
 from rl_mimicgen.dppo.config.schema import DPPORunConfig
 from rl_mimicgen.dppo.data import DPPODatasetBundle, DPPODiffusionDataset
+from rl_mimicgen.dppo.eval.eval_diffusion_agent import run_evaluation
 from rl_mimicgen.dppo.model import DiffusionModel
 
 
@@ -63,6 +64,10 @@ class WarmupCosineScheduler:
 def build_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Offline diffusion pretraining entry point for the DPPO stack.")
     parser.add_argument("--config", required=True, help="Path to the DPPO JSON config.")
+    parser.add_argument("--debug_eval_on_save", action="store_true", help="Run a quick environment eval whenever a checkpoint is saved.")
+    parser.add_argument("--debug_eval_episodes", type=int, default=1, help="Number of episodes for each debug eval.")
+    parser.add_argument("--debug_eval_max_steps", type=int, default=None, help="Optional max step count for each debug eval.")
+    parser.add_argument("--debug_eval_video", action="store_true", help="Write an eval video for each debug-eval checkpoint.")
     parser.add_argument("--dry_run", action="store_true", help="Load config and exit without training.")
     return parser
 
@@ -127,8 +132,11 @@ def main() -> None:
 
     output_dir = Path(config.output_dir)
     checkpoint_dir = output_dir / "checkpoints"
+    debug_eval_dir = output_dir / "debug_eval"
     output_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    if args.debug_eval_on_save:
+        debug_eval_dir.mkdir(parents=True, exist_ok=True)
     with open(output_dir / "config.json", "w", encoding="utf-8") as file_obj:
         json.dump(config.to_dict(), file_obj, indent=2)
 
@@ -168,6 +176,21 @@ def main() -> None:
                 checkpoint_path,
             )
             print(f"saved_checkpoint={checkpoint_path}")
+            if args.debug_eval_on_save:
+                checkpoint_eval_dir = debug_eval_dir / f"state_{epoch}"
+                checkpoint_eval_dir.mkdir(parents=True, exist_ok=True)
+                video_path = str(checkpoint_eval_dir / "eval.mp4") if args.debug_eval_video else None
+                metrics = run_evaluation(
+                    config=config,
+                    dataset=dataset,
+                    checkpoint_path=str(checkpoint_path),
+                    episodes=args.debug_eval_episodes,
+                    max_steps=args.debug_eval_max_steps,
+                    video_path=video_path,
+                )
+                with open(checkpoint_eval_dir / "eval_metrics.json", "w", encoding="utf-8") as file_obj:
+                    json.dump(metrics, file_obj, indent=2)
+                print(f"debug_eval_checkpoint={checkpoint_path} metrics={json.dumps(metrics)}")
 
 
 if __name__ == "__main__":
