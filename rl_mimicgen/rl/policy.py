@@ -355,7 +355,9 @@ class OnlinePolicyAdapter(nn.Module):
                 log_probs.append(dist.log_prob(actions[step]))
                 entropies.append(_safe_entropy(dist))
                 step_count += 1
-            return torch.stack(log_probs, dim=0).reshape(-1), torch.stack(entropies, dim=0).reshape(-1)
+            flat_log_probs = _flatten_rollout_metric(torch.stack(log_probs, dim=0), rollout_steps, num_envs)
+            flat_entropies = _flatten_rollout_metric(torch.stack(entropies, dim=0), rollout_steps, num_envs)
+            return flat_log_probs, flat_entropies
 
         flat_obs = {key: value.reshape(-1, *value.shape[2:]) for key, value in observations.items()}
         flat_goals = None if goals is None else {key: value.reshape(-1, *value.shape[2:]) for key, value in goals.items()}
@@ -445,6 +447,18 @@ def _safe_entropy(dist: D.Distribution) -> torch.Tensor:
     if ent.ndim > 1:
         ent = ent.sum(dim=-1)
     return ent
+
+
+def _flatten_rollout_metric(metric: torch.Tensor, rollout_steps: int, num_envs: int) -> torch.Tensor:
+    if metric.ndim == 0:
+        return metric.unsqueeze(0)
+    if metric.ndim == 1:
+        return metric
+    if metric.shape[0] != rollout_steps or metric.shape[1] != num_envs:
+        metric = metric.reshape(rollout_steps, num_envs, *metric.shape[1:])
+    while metric.ndim > 2:
+        metric = metric.mean(dim=-1)
+    return metric.reshape(-1)
 
 
 def _distribution_mode(dist: D.Distribution) -> torch.Tensor:

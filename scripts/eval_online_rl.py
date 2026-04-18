@@ -9,7 +9,19 @@ from typing import Any
 
 import torch
 
-from rl_mimicgen.rl import OnlineRLConfig, OnlineRLTrainer
+from rl_mimicgen.diffusion_runtime import apply_runtime_profile_to_online_rl_config
+from rl_mimicgen.rl import (
+    AWACConfig,
+    DemoConfig,
+    DiffusionConfig,
+    EvalConfig,
+    OnlineRLConfig,
+    OnlineRLTrainer,
+    OptimizerConfig,
+    PPOConfig,
+    ResidualConfig,
+    RobosuiteConfig,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -28,6 +40,25 @@ def parse_args() -> argparse.Namespace:
         help="Relative video path inside output-dir, for example videos/eval.mp4.",
     )
     return parser.parse_args()
+
+
+def config_from_dict(data: dict[str, Any]) -> OnlineRLConfig:
+    config = OnlineRLConfig(
+        **{
+            **data,
+            "optimizer": OptimizerConfig(**data.get("optimizer", {})),
+            "ppo": PPOConfig(**data.get("ppo", {})),
+            "awac": AWACConfig(**data.get("awac", {})),
+            "demo": DemoConfig(**data.get("demo", {})),
+            "residual": ResidualConfig(**data.get("residual", {})),
+            "evaluation": EvalConfig(**data.get("evaluation", {})),
+            "robosuite": RobosuiteConfig(**data.get("robosuite", {})),
+            "diffusion": DiffusionConfig(**data.get("diffusion", {})),
+        }
+    )
+    config.algorithm = str(config.algorithm).lower()
+    apply_runtime_profile_to_online_rl_config(config.diffusion)
+    return config
 
 
 def resolve_eval_checkpoint(checkpoint_path: str, output_dir: Path) -> tuple[str, dict | None, dict | None, Path | None]:
@@ -92,7 +123,7 @@ def main() -> None:
     resolved_checkpoint, residual_artifact, trainer_artifact, synthesized_checkpoint = resolve_eval_checkpoint(checkpoint_path, output_dir)
 
     if trainer_artifact is not None:
-        config = OnlineRLConfig(**trainer_artifact["config"])
+        config = config_from_dict(trainer_artifact["config"])
 
     config.output_dir = args.output_dir
     config.total_updates = 0

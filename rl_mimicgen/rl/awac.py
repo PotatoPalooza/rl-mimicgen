@@ -137,7 +137,10 @@ class AWAC:
             for _ in range(self.num_mini_batches):
                 batch = replay_buffer.sample(batch_size=self.batch_size, device=self.device)
                 critic_metrics = self._update_critics(batch)
-                actor_metrics = self._update_actor(batch)
+                if self.policy.is_recurrent and replay_buffer.can_sample_sequences(self.policy.rnn_horizon):
+                    actor_metrics = self._update_actor_sequence(replay_buffer)
+                else:
+                    actor_metrics = self._update_actor(batch)
                 self.policy.soft_update_targets()
 
                 mean_q_loss += critic_metrics["q_loss"]
@@ -260,6 +263,96 @@ class AWAC:
             "actor_loss": float(actor_loss.item()),
             "entropy": float(entropy.mean().item()),
             "demo_loss": float(demo_loss.item()),
+            "log_prob_mean": float(current_log_probs.mean().item()),
+            "log_prob_std": float(current_log_probs.std(unbiased=False).item()),
+            "log_prob_min": float(current_log_probs.min().item()),
+            "log_prob_max": float(current_log_probs.max().item()),
+            "weight_mean": float(weights.mean().item()),
+            "weight_std": float(weights.std(unbiased=False).item()),
+            "weight_min": float(weights.min().item()),
+            "weight_max": float(weights.max().item()),
+            "weight_clipped_frac": float(clipped_weight_frac.item()),
+            "advantage_mean": float(advantages.mean().item()),
+            "advantage_std": float(advantages.std(unbiased=False).item()),
+            "advantage_min": float(advantages.min().item()),
+            "advantage_max": float(advantages.max().item()),
+        }
+
+    def _update_actor_sequence(self, replay_buffer: ReplayBuffer) -> dict[str, float]:
+        if not self.policy.is_recurrent:
+            raise RuntimeError("Sequence actor updates are only valid for recurrent policies.")
+
+        sequence_length = max(1, int(self.policy.rnn_horizon))
+        num_sequences = max(1, self.batch_size // sequence_length)
+        sequence_batch = replay_buffer.sample_sequences(
+            sequence_length=sequence_length,
+            batch_size=num_sequences,
+            device=self.device,
+        )
+        flat_mask = sequence_batch.mask.reshape(-1)
+        observations = {
+            key: value.reshape(-1, *value.shape[2:])[flat_mask]
+            for key, value in sequence_batch.observations.items()
+        }
+        goals = None
+        if sequence_batch.goals is not None:
+            goals = {
+                key: value.reshape(-1, *value.shape[2:])[flat_mask]
+                for key, value in sequence_batch.goals.items()
+            }
+        actions = sequence_batch.actions.reshape(-1, sequence_batch.actions.shape[-1])[flat_mask]
+
+        with torch.no_grad():
+            q_dataset = self.policy.min_q_value(
+                observations=observations,
+                actions=actions,
+                goals=goals,
+                use_target=False,
+            )
+            v_values = self.policy.approximate_v_value(
+                observations=observations,
+                goals=goals,
+                use_target=False,
+                num_action_samples=self.num_action_samples,
+            )
+            advantages = q_dataset - v_values
+            unclipped_weights = torch.exp(advantages / self.beta)
+            clipped_weight_frac = (unclipped_weights > self.max_weight).to(dtype=torch.float32).mean()
+            weights = torch.clamp(unclipped_weights, max=self.max_weight)
+            if self.normalize_weights:
+                weights = weights / weights.mean().clamp(min=1e-8)
+
+        current_log_probs, entropy = self.policy.actor_log_prob_replay_sequence(
+            observations=sequence_batch.observations,
+            goals=sequence_batch.goals,
+            actions=sequence_batch.actions,
+            episode_starts=sequence_batch.episode_starts,
+            mask=sequence_batch.mask,
+        )
+        actor_loss = -(weights.detach() * current_log_probs).mean()
+
+        demo_loss = torch.zeros((), device=self.device)
+        if self.demo_batch_iterator is not None and self.demo_loss_fn is not None and self.demo_coef > 0.0:
+            try:
+                demo_batch = next(self.demo_batch_iterator)
+            except StopIteration as exc:
+                raise RuntimeError("Demo batch iterator was exhausted unexpectedly.") from exc
+            demo_loss = self.demo_loss_fn(demo_batch)
+
+        loss = actor_loss - (self.entropy_coef * entropy.mean()) + (self.demo_coef * demo_loss)
+        self.actor_optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        nn.utils.clip_grad_norm_(self.policy.actor_parameters(), self.max_grad_norm)
+        self.actor_optimizer.step()
+
+        return {
+            "actor_loss": float(actor_loss.item()),
+            "entropy": float(entropy.mean().item()),
+            "demo_loss": float(demo_loss.item()),
+            "log_prob_mean": float(current_log_probs.mean().item()),
+            "log_prob_std": float(current_log_probs.std(unbiased=False).item()),
+            "log_prob_min": float(current_log_probs.min().item()),
+            "log_prob_max": float(current_log_probs.max().item()),
             "weight_mean": float(weights.mean().item()),
             "weight_std": float(weights.std(unbiased=False).item()),
             "weight_min": float(weights.min().item()),

@@ -22,6 +22,12 @@ class ActionSpaceSpec:
 
 
 WORKSPACE_DIR = Path(__file__).resolve().parents[2]
+_WORKER_THREAD_ENV_VARS = (
+    "OMP_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+)
 
 
 def _ensure_local_repo_paths() -> None:
@@ -35,6 +41,15 @@ def _ensure_local_repo_paths() -> None:
             repo_path_str = str(repo_path)
             if repo_path_str not in sys.path:
                 sys.path.insert(0, repo_path_str)
+
+
+def _configure_lightweight_worker() -> None:
+    for env_var in _WORKER_THREAD_ENV_VARS:
+        os.environ[env_var] = "1"
+    torch.set_num_threads(1)
+    set_num_interop_threads = getattr(torch, "set_num_interop_threads", None)
+    if callable(set_num_interop_threads):
+        set_num_interop_threads(1)
 
 
 @dataclass(slots=True)
@@ -182,6 +197,7 @@ class SerialRobomimicVectorEnv:
 
 
 def _worker(remote, env_fn_bytes: bytes) -> None:
+    _configure_lightweight_worker()
     _ensure_local_repo_paths()
     env_fn = cloudpickle.loads(env_fn_bytes)
     env = env_fn()
@@ -245,30 +261,34 @@ class ParallelRobomimicVectorEnv:
         ctx = mp.get_context(start_method)
         self.remotes = []
         self.processes = []
-        for env_fn in env_fns:
-            parent_remote, child_remote = ctx.Pipe()
-            process = ctx.Process(target=_worker, args=(child_remote, cloudpickle.dumps(env_fn)))
-            process.daemon = True
-            process.start()
-            child_remote.close()
-            self.remotes.append(parent_remote)
-            self.processes.append(process)
+        try:
+            for env_fn in env_fns:
+                parent_remote, child_remote = ctx.Pipe()
+                process = ctx.Process(target=_worker, args=(child_remote, cloudpickle.dumps(env_fn)))
+                process.daemon = True
+                process.start()
+                child_remote.close()
+                self.remotes.append(parent_remote)
+                self.processes.append(process)
 
-        self.remotes[0].send(("metadata", None))
-        metadata = self.remotes[0].recv()
-        self.single_action_space = ActionSpaceSpec(
-            shape=tuple(metadata["action_low"].shape),
-            low=metadata["action_low"],
-            high=metadata["action_high"],
-        )
-        self.num_actions = int(np.prod(self.single_action_space.shape))
-        self.single_observation_space = {key: value.shape for key, value in metadata["sample_obs"].items()}
-        self.max_episode_length = int(metadata["horizon"])
-        self.episode_length_buf = torch.zeros(self.num_envs, dtype=torch.long)
+            self.remotes[0].send(("metadata", None))
+            metadata = self.remotes[0].recv()
+            self.single_action_space = ActionSpaceSpec(
+                shape=tuple(metadata["action_low"].shape),
+                low=metadata["action_low"],
+                high=metadata["action_high"],
+            )
+            self.num_actions = int(np.prod(self.single_action_space.shape))
+            self.single_observation_space = {key: value.shape for key, value in metadata["sample_obs"].items()}
+            self.max_episode_length = int(metadata["horizon"])
+            self.episode_length_buf = torch.zeros(self.num_envs, dtype=torch.long)
 
-        for remote in self.remotes[1:]:
-            remote.send(("reset", None))
-            remote.recv()
+            for remote in self.remotes[1:]:
+                remote.send(("reset", None))
+                remote.recv()
+        except Exception:
+            self.close()
+            raise
 
     def reset(self, seed: int | None = None) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
         for idx, remote in enumerate(self.remotes):
@@ -299,8 +319,16 @@ class ParallelRobomimicVectorEnv:
                 remote.send(("close", None))
             except (BrokenPipeError, EOFError):
                 pass
+            try:
+                remote.close()
+            except OSError:
+                pass
         for process in self.processes:
-            process.join(timeout=1.0)
+            if process.is_alive():
+                process.join(timeout=1.0)
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=1.0)
 
     def get_observations(self) -> TensorDict:
         obs, _ = self.reset()

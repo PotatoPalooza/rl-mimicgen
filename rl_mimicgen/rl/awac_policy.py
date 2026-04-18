@@ -112,6 +112,39 @@ class AWACPolicyAdapter(OnlinePolicyAdapter):
         dist, _ = self._dist_from_step(observations, goals, None)
         return dist.log_prob(actions), _safe_entropy(dist)
 
+    def actor_log_prob_replay_sequence(
+        self,
+        observations: dict[str, torch.Tensor],
+        goals: dict[str, torch.Tensor] | None,
+        actions: torch.Tensor,
+        episode_starts: torch.Tensor,
+        mask: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if not self.is_recurrent:
+            flat_mask = mask.reshape(-1)
+            flat_obs = {
+                key: value.reshape(-1, *value.shape[2:])[flat_mask]
+                for key, value in observations.items()
+            }
+            flat_goals = None
+            if goals is not None:
+                flat_goals = {
+                    key: value.reshape(-1, *value.shape[2:])[flat_mask]
+                    for key, value in goals.items()
+                }
+            flat_actions = actions.reshape(-1, actions.shape[-1])[flat_mask]
+            return self.actor_log_prob_replay(flat_obs, flat_goals, flat_actions)
+
+        log_probs, entropy = self.evaluate_actions_rollout(
+            observations=observations,
+            goals=goals,
+            actions=actions,
+            episode_starts=episode_starts,
+            initial_rnn_state=None,
+        )
+        flat_mask = mask.reshape(-1)
+        return log_probs[flat_mask], entropy[flat_mask]
+
     def sample_actions_for_value(
         self,
         observations: dict[str, torch.Tensor],

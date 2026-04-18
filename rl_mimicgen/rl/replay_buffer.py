@@ -17,6 +17,22 @@ class TransitionBatch:
     dones: torch.Tensor
 
 
+@dataclass(slots=True)
+class SequenceBatch:
+    observations: dict[str, torch.Tensor]
+    goals: dict[str, torch.Tensor] | None
+    actions: torch.Tensor
+    episode_starts: torch.Tensor
+    mask: torch.Tensor
+
+
+@dataclass(slots=True)
+class TrajectoryRecord:
+    observations: dict[str, np.ndarray]
+    goals: dict[str, np.ndarray] | None
+    actions: np.ndarray
+
+
 class ReplayBuffer:
     def __init__(
         self,
@@ -51,6 +67,7 @@ class ReplayBuffer:
         self.dones = np.zeros((self.capacity,), dtype=np.float32)
         self.ptr = 0
         self.size = 0
+        self.trajectories: list[TrajectoryRecord] = []
 
     def __len__(self) -> int:
         return self.size
@@ -139,4 +156,94 @@ class ReplayBuffer:
             actions=torch.as_tensor(self.actions[indices], dtype=torch.float32, device=device),
             rewards=torch.as_tensor(self.rewards[indices], dtype=torch.float32, device=device),
             dones=torch.as_tensor(self.dones[indices], dtype=torch.float32, device=device),
+        )
+
+    def add_trajectory(
+        self,
+        obs: dict[str, np.ndarray],
+        actions: np.ndarray,
+        goals: dict[str, np.ndarray] | None = None,
+    ) -> None:
+        if actions.shape[0] == 0:
+            return
+        trajectory = TrajectoryRecord(
+            observations={
+                key: np.asarray(value, dtype=np.float32).copy()
+                for key, value in obs.items()
+                if key in self.observations
+            },
+            goals=(
+                {
+                    key: np.asarray(value, dtype=np.float32).copy()
+                    for key, value in goals.items()
+                    if key in self.goals
+                }
+                if goals is not None and self.goals
+                else None
+            ),
+            actions=np.asarray(actions, dtype=np.float32).copy(),
+        )
+        self.trajectories.append(trajectory)
+        if len(self.trajectories) > self.capacity:
+            self.trajectories.pop(0)
+
+    def can_sample_sequences(self, sequence_length: int) -> bool:
+        required_length = max(1, int(sequence_length))
+        return any(record.actions.shape[0] >= 1 for record in self.trajectories) and required_length > 0
+
+    def sample_sequences(self, sequence_length: int, batch_size: int, device: torch.device) -> SequenceBatch:
+        if not self.trajectories:
+            raise RuntimeError("Replay buffer does not contain any stored trajectories.")
+
+        seq_len = max(1, int(sequence_length))
+        num_sequences = max(1, int(batch_size))
+        candidate_indices = [idx for idx, record in enumerate(self.trajectories) if record.actions.shape[0] >= 1]
+        if not candidate_indices:
+            raise RuntimeError("Replay buffer does not contain any non-empty trajectories.")
+
+        obs_batch = {
+            key: np.zeros((seq_len, num_sequences, *shape), dtype=np.float32)
+            for key, shape in self.obs_shapes.items()
+        }
+        goal_batch = {
+            key: np.zeros((seq_len, num_sequences, *shape), dtype=np.float32)
+            for key, shape in self.goal_shapes.items()
+        }
+        action_batch = np.zeros((seq_len, num_sequences, self.action_dim), dtype=np.float32)
+        episode_starts = np.zeros((seq_len, num_sequences), dtype=bool)
+        mask = np.zeros((seq_len, num_sequences), dtype=bool)
+
+        sampled_traj_ids = np.random.choice(candidate_indices, size=num_sequences, replace=True)
+        for column, traj_idx in enumerate(sampled_traj_ids):
+            record = self.trajectories[int(traj_idx)]
+            traj_len = int(record.actions.shape[0])
+            start_idx = 0 if traj_len <= seq_len else int(np.random.randint(0, traj_len - seq_len + 1))
+            actual_len = min(seq_len, traj_len - start_idx)
+            end_idx = start_idx + actual_len
+
+            for key in obs_batch:
+                obs_batch[key][:actual_len, column] = record.observations[key][start_idx:end_idx]
+            for key in goal_batch:
+                if record.goals is not None and key in record.goals:
+                    goal_batch[key][:actual_len, column] = record.goals[key][start_idx:end_idx]
+            action_batch[:actual_len, column] = record.actions[start_idx:end_idx]
+            episode_starts[0, column] = True
+            mask[:actual_len, column] = True
+
+        tensor_goals = None
+        if goal_batch:
+            tensor_goals = {
+                key: torch.as_tensor(value, dtype=torch.float32, device=device)
+                for key, value in goal_batch.items()
+            }
+
+        return SequenceBatch(
+            observations={
+                key: torch.as_tensor(value, dtype=torch.float32, device=device)
+                for key, value in obs_batch.items()
+            },
+            goals=tensor_goals,
+            actions=torch.as_tensor(action_batch, dtype=torch.float32, device=device),
+            episode_starts=torch.as_tensor(episode_starts, dtype=torch.bool, device=device),
+            mask=torch.as_tensor(mask, dtype=torch.bool, device=device),
         )

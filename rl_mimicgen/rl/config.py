@@ -86,6 +86,7 @@ class RobosuiteConfig:
     terminate_on_success: bool = True
     parallel_envs: bool = True
     start_method: str = "spawn"
+    envs_per_worker: int = 1
     render_train: bool = False
     camera_name: str = "agentview"
 

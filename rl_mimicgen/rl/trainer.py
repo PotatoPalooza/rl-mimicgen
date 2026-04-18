@@ -4,6 +4,7 @@ import json
 import random
 from collections import OrderedDict
 from pathlib import Path
+from time import perf_counter
 
 import h5py
 import imageio
@@ -85,6 +86,14 @@ class OnlineRLTrainer:
             render=config.evaluation.render,
             render_offscreen=bool(config.evaluation.video_path),
         )
+        self._emit(
+            "[env] "
+            f"train_backend={self._env_backend_name(self.env)} "
+            f"train_num_envs={getattr(self.env, 'num_envs', 1)} "
+            f"eval_backend={self._env_backend_name(self.eval_env)} "
+            f"eval_num_envs={getattr(self.eval_env, 'num_envs', 1)} "
+            f"device={self.device}"
+        )
         action_dim = int(np.prod(self.env.single_action_space.shape))
 
         self.demo_loader = None
@@ -95,6 +104,9 @@ class OnlineRLTrainer:
 
         self.storage = None
         self.replay_buffer = None
+        self._awac_episode_observations: list[dict[str, list[np.ndarray]]] | None = None
+        self._awac_episode_goals: list[dict[str, list[np.ndarray]]] | None = None
+        self._awac_episode_actions: list[list[np.ndarray]] | None = None
 
         if self.is_diffusion_policy:
             self.storage = DiffusionRolloutStorage(
@@ -137,6 +149,7 @@ class OnlineRLTrainer:
                     goal_shapes=self.policy.goal_shapes,
                     action_dim=action_dim,
                 )
+                self._init_awac_episode_storage()
                 self._load_awac_offline_data()
                 self.algorithm = AWAC(
                     policy=self.policy,
@@ -226,6 +239,7 @@ class OnlineRLTrainer:
                 self.storage.set_initial_rnn_state(self.policy.clone_training_rollout_state())
 
             rollout_step_count = 0
+            rollout_start_time = perf_counter()
             while rollout_step_count < self.config.rollout_steps:
                 if self.is_diffusion_policy:
                     env_actions, replan_data, completed_envs = self.policy.act(
@@ -293,6 +307,7 @@ class OnlineRLTrainer:
                 episode_starts = done
                 rollout_step_count += 1
 
+            rollout_duration_sec = perf_counter() - rollout_start_time
             rollout_env_steps = rollout_step_count * self.config.num_envs
             total_env_steps += rollout_env_steps
             self.algorithm.set_total_env_steps(total_env_steps)
@@ -303,7 +318,9 @@ class OnlineRLTrainer:
                 gae_lambda=self.config.ppo.gae_lambda,
             )
 
+            update_start_time = perf_counter()
             update_metrics = self.algorithm.update(self.storage.as_batch())
+            update_duration_sec = perf_counter() - update_start_time
             train_metrics = {
                 "policy_loss": float(update_metrics["surrogate"]),
                 "value_loss": float(update_metrics["value"]),
@@ -322,6 +339,11 @@ class OnlineRLTrainer:
             train_metrics["rollout_horizon"] = float(episode_horizon)
             train_metrics["env_steps"] = float(total_env_steps)
             train_metrics["algorithm"] = 0.0 if self.algorithm_name == "ppo" else 1.0
+            train_metrics["timing/rollout_sec"] = rollout_duration_sec
+            train_metrics["timing/update_sec"] = update_duration_sec
+            train_metrics["timing/rollout_sps"] = (
+                float(rollout_env_steps) / rollout_duration_sec if rollout_duration_sec > 0.0 else 0.0
+            )
             for metric_name in (
                 "weight_mean",
                 "weight_std",
@@ -342,15 +364,19 @@ class OnlineRLTrainer:
                 train_metrics["log_std_max"] = float(current_log_std.max().item())
 
             if self.config.evaluation.enabled and ((update + 1) % self.config.evaluation.every_n_updates == 0):
+                eval_start_time = perf_counter()
                 eval_metrics = self.evaluate(update)
+                eval_duration_sec = perf_counter() - eval_start_time
                 self.last_eval_metrics = eval_metrics
                 train_metrics.update({f"eval/{k}": v for k, v in eval_metrics.items()})
                 train_metrics["eval/was_run"] = 1.0
+                train_metrics["timing/eval_sec"] = eval_duration_sec
                 if eval_metrics["success_rate"] > self.best_success:
                     self.best_success = eval_metrics["success_rate"]
                     self.save_best_checkpoint(update + 1, eval_metrics["success_rate"])
             else:
                 train_metrics["eval/was_run"] = 0.0
+                train_metrics["timing/eval_sec"] = 0.0
                 if self.last_eval_metrics is not None:
                     train_metrics["eval/last_success_rate"] = self.last_eval_metrics["success_rate"]
                     train_metrics["eval/last_return_mean"] = self.last_eval_metrics["return_mean"]
@@ -390,6 +416,7 @@ class OnlineRLTrainer:
             self.algorithm.demo_coef = self.current_demo_coef
 
             rollout_step_count = 0
+            rollout_start_time = perf_counter()
             while rollout_step_count < self.config.rollout_steps:
                 env_actions, policy_actions, _, _ = self.policy.act(
                     obs=obs,
@@ -410,6 +437,12 @@ class OnlineRLTrainer:
                     goals=goal,
                     next_goals=next_goal,
                 )
+                self._record_awac_online_sequences(
+                    obs=obs,
+                    actions=policy_actions,
+                    goals=goal,
+                    done=done,
+                )
 
                 running_returns += rewards
                 running_lengths += 1
@@ -429,11 +462,14 @@ class OnlineRLTrainer:
                 episode_starts = done
                 rollout_step_count += 1
 
+            rollout_duration_sec = perf_counter() - rollout_start_time
             rollout_env_steps = rollout_step_count * self.config.num_envs
             total_env_steps += rollout_env_steps
             self.algorithm.set_total_env_steps(total_env_steps)
 
+            update_start_time = perf_counter()
             update_metrics = self.algorithm.update(self.replay_buffer)
+            update_duration_sec = perf_counter() - update_start_time
             train_metrics = {
                 "policy_loss": float(update_metrics["surrogate"]),
                 "value_loss": float(update_metrics["value"]),
@@ -452,6 +488,9 @@ class OnlineRLTrainer:
                 "rollout_horizon": float(episode_horizon),
                 "env_steps": float(total_env_steps),
                 "algorithm": 1.0,
+                "timing/rollout_sec": rollout_duration_sec,
+                "timing/update_sec": update_duration_sec,
+                "timing/rollout_sps": float(rollout_env_steps) / rollout_duration_sec if rollout_duration_sec > 0.0 else 0.0,
             }
             for metric_name in (
                 "weight_mean",
@@ -463,6 +502,10 @@ class OnlineRLTrainer:
                 "advantage_std",
                 "advantage_min",
                 "advantage_max",
+                "log_prob_mean",
+                "log_prob_std",
+                "log_prob_min",
+                "log_prob_max",
                 "q_pred_mean",
                 "target_q_mean",
                 "q_gap_mean",
@@ -476,15 +519,19 @@ class OnlineRLTrainer:
                 train_metrics["log_std_max"] = float(current_log_std.max().item())
 
             if self.config.evaluation.enabled and ((update + 1) % self.config.evaluation.every_n_updates == 0):
+                eval_start_time = perf_counter()
                 eval_metrics = self.evaluate(update)
+                eval_duration_sec = perf_counter() - eval_start_time
                 self.last_eval_metrics = eval_metrics
                 train_metrics.update({f"eval/{k}": v for k, v in eval_metrics.items()})
                 train_metrics["eval/was_run"] = 1.0
+                train_metrics["timing/eval_sec"] = eval_duration_sec
                 if eval_metrics["success_rate"] > self.best_success:
                     self.best_success = eval_metrics["success_rate"]
                     self.save_best_checkpoint(update + 1, eval_metrics["success_rate"])
             else:
                 train_metrics["eval/was_run"] = 0.0
+                train_metrics["timing/eval_sec"] = 0.0
                 if self.last_eval_metrics is not None:
                     train_metrics["eval/last_success_rate"] = self.last_eval_metrics["success_rate"]
                     train_metrics["eval/last_return_mean"] = self.last_eval_metrics["return_mean"]
@@ -735,9 +782,79 @@ class OnlineRLTrainer:
                     goals=None,
                     next_goals=None,
                 )
+                self.replay_buffer.add_trajectory(
+                    obs=observations,
+                    actions=actions,
+                    goals=None,
+                )
                 transitions_loaded += actions.shape[0]
 
         self._emit(f"[awac] loaded_offline_transitions={transitions_loaded} replay_size={len(self.replay_buffer)}")
+
+    def _init_awac_episode_storage(self) -> None:
+        if self.algorithm_name != "awac":
+            return
+        self._awac_episode_observations = [
+            {key: [] for key in self.policy.obs_shapes}
+            for _ in range(self.config.num_envs)
+        ]
+        self._awac_episode_goals = [
+            {key: [] for key in self.policy.goal_shapes}
+            for _ in range(self.config.num_envs)
+        ]
+        self._awac_episode_actions = [[] for _ in range(self.config.num_envs)]
+
+    def _record_awac_online_sequences(
+        self,
+        obs: dict[str, np.ndarray],
+        actions: np.ndarray,
+        goals: dict[str, np.ndarray] | None,
+        done: np.ndarray,
+    ) -> None:
+        if self.replay_buffer is None or self._awac_episode_observations is None or self._awac_episode_actions is None:
+            return
+
+        for env_idx in range(self.config.num_envs):
+            obs_store = self._awac_episode_observations[env_idx]
+            for key in obs_store:
+                obs_store[key].append(np.asarray(obs[key][env_idx], dtype=np.float32))
+
+            if self._awac_episode_goals is not None and self.policy.goal_shapes:
+                goal_store = self._awac_episode_goals[env_idx]
+                if goals is not None:
+                    for key in goal_store:
+                        goal_store[key].append(np.asarray(goals[key][env_idx], dtype=np.float32))
+
+            self._awac_episode_actions[env_idx].append(np.asarray(actions[env_idx], dtype=np.float32))
+
+            if not bool(done[env_idx]):
+                continue
+
+            trajectory_obs = {
+                key: np.stack(values, axis=0)
+                for key, values in obs_store.items()
+                if values
+            }
+            trajectory_goals = None
+            if self.policy.goal_shapes and self._awac_episode_goals is not None:
+                goal_store = self._awac_episode_goals[env_idx]
+                if any(goal_store.values()):
+                    trajectory_goals = {
+                        key: np.stack(values, axis=0)
+                        for key, values in goal_store.items()
+                        if values
+                    }
+            trajectory_actions = np.stack(self._awac_episode_actions[env_idx], axis=0)
+            self.replay_buffer.add_trajectory(
+                obs=trajectory_obs,
+                actions=trajectory_actions,
+                goals=trajectory_goals,
+            )
+
+            self._awac_episode_observations[env_idx] = {key: [] for key in self.policy.obs_shapes}
+            if self._awac_episode_goals is not None:
+                self._awac_episode_goals[env_idx] = {key: [] for key in self.policy.goal_shapes}
+            self._awac_episode_actions[env_idx] = []
 
     def _resolve_awac_dataset_path(self) -> str | None:
         if self.config.awac.dataset_path is not None:
@@ -802,7 +919,13 @@ class OnlineRLTrainer:
         )
         env_fns = [factory for _ in range(self.config.num_envs)]
         if self.config.robosuite.parallel_envs and self.config.num_envs > 1:
-            return ParallelRobomimicVectorEnv(env_fns, start_method=self.config.robosuite.start_method)
+            try:
+                return ParallelRobomimicVectorEnv(env_fns, start_method=self.config.robosuite.start_method)
+            except (ConnectionResetError, BrokenPipeError, EOFError) as exc:
+                self._emit(
+                    "parallel training env startup failed; falling back to serial envs "
+                    f"(start_method={self.config.robosuite.start_method}, error={exc})"
+                )
         return SerialRobomimicVectorEnv(env_fns)
 
     def _build_eval_env(self, render: bool, render_offscreen: bool):
@@ -819,7 +942,13 @@ class OnlineRLTrainer:
 
         env_fns = [factory for _ in range(self.config.evaluation.num_envs)]
         if self.config.robosuite.parallel_envs and self.config.evaluation.num_envs > 1:
-            return ParallelRobomimicVectorEnv(env_fns, start_method=self.config.robosuite.start_method)
+            try:
+                return ParallelRobomimicVectorEnv(env_fns, start_method=self.config.robosuite.start_method)
+            except (ConnectionResetError, BrokenPipeError, EOFError) as exc:
+                self._emit(
+                    "parallel eval env startup failed; falling back to serial envs "
+                    f"(start_method={self.config.robosuite.start_method}, error={exc})"
+                )
         return SerialRobomimicVectorEnv(env_fns)
 
     def _env_horizon(self) -> int:
@@ -860,6 +989,14 @@ class OnlineRLTrainer:
         if device == "cuda" and not torch.cuda.is_available():
             return torch.device("cpu")
         return torch.device(device)
+
+    @staticmethod
+    def _env_backend_name(env) -> str:
+        if isinstance(env, ParallelRobomimicVectorEnv):
+            return "parallel"
+        if isinstance(env, SerialRobomimicVectorEnv):
+            return "serial"
+        return type(env).__name__
 
     @staticmethod
     def _seed_everything(seed: int) -> None:
