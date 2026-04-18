@@ -218,5 +218,7 @@ mimicgen
 uv.lock
 analysis
 config
+!rl_mimicgen/dppo/config/
+!rl_mimicgen/dppo/config/*.py
 .codex
 tmp.txt
