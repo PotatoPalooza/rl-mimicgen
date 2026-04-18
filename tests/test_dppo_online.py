@@ -4,11 +4,19 @@ from copy import deepcopy
 from pathlib import Path
 
 import numpy as np
+import pytest
 import torch
 
 from rl_mimicgen.dppo.config.schema import DPPODiffusionConfig, DPPODatasetConfig, DPPOOnlineConfig, DPPORunConfig, DPPOTrainConfig
 from rl_mimicgen.dppo.data.dataset import DPPODatasetBundle, DPPONormalizationStats
-from rl_mimicgen.dppo.finetune.train_dppo_agent import _load_existing_metrics, _restore_algorithm_state, _save_training_checkpoint
+from rl_mimicgen.dppo.finetune.train_dppo_agent import (
+    _assert_checkpoint_matches_config,
+    _load_checkpoint_payload,
+    _load_existing_metrics,
+    _restore_algorithm_state,
+    _save_training_checkpoint,
+    _validate_resume_checkpoint,
+)
 from rl_mimicgen.dppo.model import DiffusionModel
 from rl_mimicgen.dppo.online import DiffusionPPO, DiffusionRolloutStorage
 from rl_mimicgen.dppo.policy import DiffusionPolicyAdapter
@@ -88,7 +96,7 @@ def _make_checkpoint(tmp_path, config: DPPORunConfig, bundle: DPPODatasetBundle)
         device=config.device,
     )
     checkpoint_path = tmp_path / "checkpoint.pt"
-    torch.save({"model": deepcopy(actor.state_dict())}, checkpoint_path)
+    torch.save({"model": deepcopy(actor.state_dict()), "config": config.to_dict()}, checkpoint_path)
     return str(checkpoint_path)
 
 
@@ -307,7 +315,8 @@ def test_dppo_finetune_helpers_resume_optimizer_state_and_metrics(tmp_path) -> N
         device=config.device,
     )
 
-    completed_updates, total_env_steps = _restore_algorithm_state(resumed_algorithm, str(resumed_checkpoint))
+    payload = _load_checkpoint_payload(str(resumed_checkpoint), device=torch.device(config.device))
+    completed_updates, total_env_steps = _restore_algorithm_state(resumed_algorithm, payload)
     resumed_metrics = _load_existing_metrics(metrics_path, resume=True, max_update_index=completed_updates)
     fresh_metrics = _load_existing_metrics(metrics_path, resume=False)
 
@@ -317,3 +326,42 @@ def test_dppo_finetune_helpers_resume_optimizer_state_and_metrics(tmp_path) -> N
     assert resumed_algorithm.total_env_steps == 17
     assert resumed_metrics == [{"update_index": 1}]
     assert fresh_metrics == []
+
+
+def test_dppo_resume_validation_rejects_offline_checkpoint(tmp_path) -> None:
+    config = _make_config()
+    bundle = _make_bundle()
+    checkpoint_path = _make_checkpoint(tmp_path, config, bundle)
+    payload = _load_checkpoint_payload(checkpoint_path, device=torch.device(config.device))
+
+    with pytest.raises(RuntimeError, match="--resume requires a local finetune checkpoint"):
+        _validate_resume_checkpoint(payload, checkpoint_path)
+
+
+def test_dppo_resume_validation_rejects_filename_update_step_mismatch(tmp_path) -> None:
+    config = _make_config()
+    bundle = _make_bundle()
+    checkpoint_path = _make_checkpoint(tmp_path, config, bundle)
+    policy = DiffusionPolicyAdapter(config=config, bundle=bundle, checkpoint_path=checkpoint_path, deterministic=False)
+    algorithm = DiffusionPPO(policy=policy, device=config.device)
+    algorithm.update_step = 2
+
+    mismatched_path = tmp_path / "state_3.pt"
+    _save_training_checkpoint(mismatched_path, policy=policy, algorithm=algorithm, config=config)
+    payload = _load_checkpoint_payload(str(mismatched_path), device=torch.device(config.device))
+
+    with pytest.raises(RuntimeError, match="filename/update_step mismatch"):
+        _validate_resume_checkpoint(payload, str(mismatched_path))
+
+
+def test_dppo_checkpoint_config_validation_rejects_task_mismatch(tmp_path) -> None:
+    config = _make_config()
+    bundle = _make_bundle()
+    checkpoint_path = _make_checkpoint(tmp_path, config, bundle)
+    payload = _load_checkpoint_payload(checkpoint_path, device=torch.device(config.device))
+    mismatched = _make_config()
+    mismatched.task = "square"
+    mismatched.dataset.task = "square"
+
+    with pytest.raises(RuntimeError, match="Checkpoint/config mismatch"):
+        _assert_checkpoint_matches_config(mismatched, payload)

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import re
 
 import numpy as np
 import torch
@@ -13,6 +14,110 @@ from rl_mimicgen.dppo.envs import make_mimicgen_lowdim_env
 from rl_mimicgen.dppo.eval.eval_diffusion_agent import run_evaluation
 from rl_mimicgen.dppo.online import DiffusionPPO, DiffusionRolloutStorage
 from rl_mimicgen.dppo.policy import DiffusionPolicyAdapter
+
+
+def _load_checkpoint_payload(checkpoint_path: str, device: torch.device) -> dict[str, object]:
+    payload = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"Expected checkpoint payload to be a dict, found {type(payload).__name__}.")
+    return payload
+
+
+def _parse_checkpoint_update_index(checkpoint_path: str) -> int | None:
+    match = re.fullmatch(r"state_(\d+)", Path(checkpoint_path).stem)
+    if match is None:
+        return None
+    return int(match.group(1))
+
+
+def _normalize_config_value(value: object) -> object:
+    if isinstance(value, list):
+        return tuple(value)
+    return value
+
+
+def _assert_checkpoint_matches_config(
+    run_config: DPPORunConfig,
+    checkpoint_payload: dict[str, object],
+) -> None:
+    checkpoint_config_payload = checkpoint_payload.get("config")
+    if checkpoint_config_payload is None:
+        return
+    if not isinstance(checkpoint_config_payload, dict):
+        raise RuntimeError(f"Expected checkpoint config to be a dict, found {type(checkpoint_config_payload).__name__}.")
+
+    expected_pairs = {
+        "task": (run_config.task, checkpoint_config_payload.get("task")),
+        "variant": (run_config.variant, checkpoint_config_payload.get("variant")),
+        "dataset.task": (run_config.dataset.task, checkpoint_config_payload.get("dataset", {}).get("task")),
+        "dataset.variant": (run_config.dataset.variant, checkpoint_config_payload.get("dataset", {}).get("variant")),
+        "diffusion.horizon_steps": (
+            run_config.diffusion.horizon_steps,
+            checkpoint_config_payload.get("diffusion", {}).get("horizon_steps"),
+        ),
+        "diffusion.act_steps": (
+            run_config.diffusion.act_steps,
+            checkpoint_config_payload.get("diffusion", {}).get("act_steps"),
+        ),
+        "diffusion.cond_steps": (
+            run_config.diffusion.cond_steps,
+            checkpoint_config_payload.get("diffusion", {}).get("cond_steps"),
+        ),
+        "diffusion.denoising_steps": (
+            run_config.diffusion.denoising_steps,
+            checkpoint_config_payload.get("diffusion", {}).get("denoising_steps"),
+        ),
+        "diffusion.predict_epsilon": (
+            run_config.diffusion.predict_epsilon,
+            checkpoint_config_payload.get("diffusion", {}).get("predict_epsilon"),
+        ),
+        "diffusion.denoised_clip_value": (
+            run_config.diffusion.denoised_clip_value,
+            checkpoint_config_payload.get("diffusion", {}).get("denoised_clip_value"),
+        ),
+        "diffusion.time_dim": (
+            run_config.diffusion.time_dim,
+            checkpoint_config_payload.get("diffusion", {}).get("time_dim"),
+        ),
+        "diffusion.mlp_dims": (
+            tuple(run_config.diffusion.mlp_dims),
+            _normalize_config_value(checkpoint_config_payload.get("diffusion", {}).get("mlp_dims")),
+        ),
+        "diffusion.residual_style": (
+            run_config.diffusion.residual_style,
+            checkpoint_config_payload.get("diffusion", {}).get("residual_style"),
+        ),
+    }
+    mismatches = [
+        f"{key}: config={expected!r} checkpoint={actual!r}"
+        for key, (expected, actual) in expected_pairs.items()
+        if expected != actual
+    ]
+    if mismatches:
+        raise RuntimeError("Checkpoint/config mismatch:\n" + "\n".join(mismatches))
+
+
+def _validate_resume_checkpoint(
+    checkpoint_payload: dict[str, object],
+    checkpoint_path: str,
+) -> None:
+    required_keys = {"actor", "ema_actor", "critic", "optimizer"}
+    missing_keys = sorted(key for key in required_keys if key not in checkpoint_payload)
+    if missing_keys:
+        raise RuntimeError(
+            f"--resume requires a local finetune checkpoint with keys {sorted(required_keys)}; "
+            f"{checkpoint_path} is missing {missing_keys}."
+        )
+    optimizer_state = checkpoint_payload["optimizer"]
+    if not isinstance(optimizer_state, dict):
+        raise RuntimeError(f"Expected optimizer state dict in {checkpoint_path}, found {type(optimizer_state).__name__}.")
+    update_step = int(optimizer_state.get("update_step", 0))
+    checkpoint_index = _parse_checkpoint_update_index(checkpoint_path)
+    if checkpoint_index is not None and checkpoint_index != update_step:
+        raise RuntimeError(
+            f"Resume checkpoint filename/update_step mismatch for {checkpoint_path}: "
+            f"filename={checkpoint_index} optimizer.update_step={update_step}."
+        )
 
 
 def _load_existing_metrics(
@@ -33,12 +138,13 @@ def _load_existing_metrics(
 
 def _restore_algorithm_state(
     algorithm: DiffusionPPO,
-    checkpoint_path: str,
+    checkpoint_payload: dict[str, object],
 ) -> tuple[int, int]:
-    checkpoint = torch.load(checkpoint_path, map_location=algorithm.device, weights_only=False)
-    optimizer_state = checkpoint.get("optimizer")
+    optimizer_state = checkpoint_payload.get("optimizer")
     if optimizer_state is None:
         return 0, 0
+    if not isinstance(optimizer_state, dict):
+        raise RuntimeError(f"Expected optimizer state dict, found {type(optimizer_state).__name__}.")
     algorithm.load(optimizer_state)
     return algorithm.update_step, algorithm.total_env_steps
 
@@ -96,7 +202,12 @@ def main() -> None:
     if checkpoint_path is None:
         raise ValueError("Fine-tuning bootstrap requires --checkpoint or config.checkpoint_path.")
 
-    env = make_mimicgen_lowdim_env(task=config.task, variant=config.variant)
+    device = torch.device(config.device)
+    checkpoint_payload = _load_checkpoint_payload(checkpoint_path, device=device)
+    _assert_checkpoint_matches_config(config, checkpoint_payload)
+    if args.resume:
+        _validate_resume_checkpoint(checkpoint_payload, checkpoint_path)
+
     policy = DiffusionPolicyAdapter(config=config, bundle=dataset, checkpoint_path=checkpoint_path, deterministic=False)
     rollout_target = args.rollout_steps or config.online.rollout_steps
     storage = DiffusionRolloutStorage(
@@ -107,7 +218,7 @@ def main() -> None:
         action_dim=dataset.action_dim,
         prediction_horizon=config.diffusion.horizon_steps,
         chain_length=config.diffusion.denoising_steps,
-        device=torch.device(config.device),
+        device=device,
     )
     algorithm = DiffusionPPO(
         policy=policy,
@@ -122,7 +233,7 @@ def main() -> None:
         act_steps=config.diffusion.act_steps,
         max_grad_norm=config.online.max_grad_norm,
         target_kl=config.online.target_kl,
-        device=config.device,
+        device=device,
     )
     algorithm.train_mode()
 
@@ -132,7 +243,7 @@ def main() -> None:
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     metrics_path = output_dir / "rollout_metrics.json"
 
-    completed_updates, total_env_steps = _restore_algorithm_state(algorithm, checkpoint_path) if args.resume else (0, 0)
+    completed_updates, total_env_steps = _restore_algorithm_state(algorithm, checkpoint_payload) if args.resume else (0, 0)
     all_metrics: list[dict[str, object]] = _load_existing_metrics(metrics_path, resume=args.resume, max_update_index=completed_updates)
     if completed_updates >= args.total_updates:
         print(
@@ -145,6 +256,7 @@ def main() -> None:
                 json.dump(all_metrics, file_obj, indent=2)
         return
 
+    env = make_mimicgen_lowdim_env(task=config.task, variant=config.variant)
     obs = env.reset()
     episode_starts = np.ones(1, dtype=bool)
     last_batch = None
