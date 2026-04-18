@@ -54,6 +54,21 @@ class MimicGenLowDimEnv:
         if callable(close_fn):
             close_fn()
 
+    def render_rgb_array(
+        self,
+        camera_name: str = "agentview",
+        height: int = 512,
+        width: int = 512,
+    ) -> np.ndarray:
+        return np.asarray(
+            self._env.render(
+                mode="rgb_array",
+                camera_name=camera_name,
+                height=height,
+                width=width,
+            )
+        )
+
 
 def make_mimicgen_lowdim_env(
     task: str,

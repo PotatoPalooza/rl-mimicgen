@@ -4,6 +4,7 @@ import argparse
 import json
 from pathlib import Path
 
+import imageio
 import numpy as np
 import torch
 
@@ -20,6 +21,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--episodes", type=int, default=1, help="Number of episodes to evaluate.")
     parser.add_argument("--max_steps", type=int, default=None, help="Maximum environment steps per episode.")
     parser.add_argument("--output_dir", default=None, help="Directory to write eval metrics.")
+    parser.add_argument("--video_path", default=None, help="Optional path for an eval video.")
     parser.add_argument("--smoke_env_reset", action="store_true", help="Create the low-dim env and run a reset during dry-run validation.")
     parser.add_argument("--dry_run", action="store_true", help="Load config and exit without evaluation.")
     return parser
@@ -32,8 +34,17 @@ def run_evaluation(
     actor_override: torch.nn.Module | None = None,
     episodes: int = 1,
     max_steps: int | None = None,
+    video_path: str | None = None,
+    video_fps: int = 20,
+    video_camera: str = "agentview",
+    video_height: int = 512,
+    video_width: int = 512,
 ) -> dict[str, float]:
-    env = make_mimicgen_lowdim_env(task=config.task, variant=config.variant)
+    env = make_mimicgen_lowdim_env(
+        task=config.task,
+        variant=config.variant,
+        render_offscreen=bool(video_path),
+    )
     policy = DiffusionPolicyAdapter(config=config, bundle=dataset, checkpoint_path=checkpoint_path, deterministic=True)
     if actor_override is not None:
         policy.ema_actor.load_state_dict(actor_override.state_dict(), strict=False)
@@ -41,6 +52,9 @@ def run_evaluation(
     episode_lengths: list[int] = []
     successes: list[float] = []
     effective_max_steps = max_steps or env.horizon
+    if video_path is not None:
+        Path(video_path).expanduser().resolve().parent.mkdir(parents=True, exist_ok=True)
+    video_writer = imageio.get_writer(video_path, fps=video_fps) if video_path is not None else None
     for episode_index in range(episodes):
         obs = env.reset()
         total_reward = 0.0
@@ -56,10 +70,20 @@ def run_evaluation(
             success = success or bool(info.get("success", False))
             step_count += 1
             episode_starts[0] = bool(done)
+            if video_writer is not None:
+                video_writer.append_data(
+                    env.render_rgb_array(
+                        camera_name=video_camera,
+                        height=video_height,
+                        width=video_width,
+                    )
+                )
         episode_returns.append(float(total_reward))
         episode_lengths.append(step_count)
         successes.append(float(success))
         print(f"episode={episode_index + 1} return={total_reward:.6f} length={step_count} success={int(success)}")
+    if video_writer is not None:
+        video_writer.close()
     env.close()
     return {
         "episodes": float(episodes),
@@ -97,6 +121,7 @@ def main() -> None:
         checkpoint_path=checkpoint_path,
         episodes=args.episodes,
         max_steps=args.max_steps,
+        video_path=args.video_path,
     )
     print(json.dumps(metrics, indent=2))
     if args.output_dir is not None:
