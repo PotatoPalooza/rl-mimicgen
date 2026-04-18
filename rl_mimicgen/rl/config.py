@@ -34,10 +34,16 @@ class PPOConfig:
 @dataclass
 class AWACConfig:
     dataset_path: str | None = None
+    offline_pretrain_updates: int = 0
     discount: float = 0.99
     beta: float = 1.0
     max_weight: float = 20.0
     normalize_weights: bool = True
+    native_actor: bool = False
+    actor_hidden_sizes: tuple[int, ...] | None = None
+    actor_fixed_std: bool = False
+    actor_init_std: float = 0.3
+    actor_use_tanh: bool = False
     behavior_kl_coef: float = 0.0
     actor_batch_size: int = 256
     replay_capacity: int = 500000

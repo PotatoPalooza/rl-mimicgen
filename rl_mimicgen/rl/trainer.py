@@ -67,6 +67,15 @@ class OnlineRLTrainer:
                     residual_enabled=config.residual.enabled,
                     residual_scale=config.residual.scale,
                     q_hidden_sizes=tuple(int(dim) for dim in config.awac.q_hidden_sizes),
+                    native_actor=config.awac.native_actor,
+                    actor_hidden_sizes=(
+                        None
+                        if config.awac.actor_hidden_sizes is None
+                        else tuple(int(dim) for dim in config.awac.actor_hidden_sizes)
+                    ),
+                    actor_fixed_std=config.awac.actor_fixed_std,
+                    actor_init_std=config.awac.actor_init_std,
+                    actor_use_tanh=config.awac.actor_use_tanh,
                     num_q_networks=config.awac.num_q_networks,
                     target_tau=config.awac.target_tau,
                     num_value_action_samples=config.awac.num_action_samples,

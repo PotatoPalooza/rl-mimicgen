@@ -5,6 +5,7 @@ from copy import deepcopy
 import torch
 import torch.nn as nn
 
+import robomimic.models.policy_nets as PolicyNets
 import robomimic.utils.obs_utils as ObsUtils
 import robomimic.utils.tensor_utils as TensorUtils
 import robomimic.utils.torch_utils as TorchUtils
@@ -18,6 +19,11 @@ class AWACPolicyAdapter(OnlinePolicyAdapter):
         self,
         *args,
         q_hidden_sizes: tuple[int, ...] = (256, 256),
+        native_actor: bool = False,
+        actor_hidden_sizes: tuple[int, ...] | None = None,
+        actor_fixed_std: bool = False,
+        actor_init_std: float = 0.3,
+        actor_use_tanh: bool = False,
         num_q_networks: int = 2,
         target_tau: float = 0.005,
         num_value_action_samples: int = 4,
@@ -26,6 +32,13 @@ class AWACPolicyAdapter(OnlinePolicyAdapter):
         super().__init__(*args, **kwargs)
         if self.residual_enabled:
             raise ValueError("Residual fine-tuning is not supported for replay-based AWAC.")
+        if native_actor:
+            self._build_native_actor(
+                actor_hidden_sizes=q_hidden_sizes if actor_hidden_sizes is None else actor_hidden_sizes,
+                actor_fixed_std=actor_fixed_std,
+                actor_init_std=actor_init_std,
+                actor_use_tanh=actor_use_tanh,
+            )
 
         encoder_kwargs = ObsUtils.obs_encoder_kwargs_from_config(self.algo.obs_config.encoder)
         self.q_networks = nn.ModuleList(
@@ -58,6 +71,38 @@ class AWACPolicyAdapter(OnlinePolicyAdapter):
         with torch.no_grad():
             for q_net, target_q_net in zip(self.q_networks, self.target_q_networks):
                 TorchUtils.hard_update(source=q_net, target=target_q_net)
+
+    def _build_native_actor(
+        self,
+        actor_hidden_sizes: tuple[int, ...],
+        actor_fixed_std: bool,
+        actor_init_std: float,
+        actor_use_tanh: bool,
+    ) -> None:
+        encoder_kwargs = ObsUtils.obs_encoder_kwargs_from_config(self.algo.obs_config.encoder)
+        native_actor = PolicyNets.GaussianActorNetwork(
+            obs_shapes=self.obs_shapes,
+            goal_shapes=self.goal_shapes,
+            ac_dim=self.bundle.shape_meta["ac_dim"],
+            mlp_layer_dims=list(actor_hidden_sizes),
+            fixed_std=actor_fixed_std,
+            init_std=actor_init_std,
+            low_noise_eval=True,
+            use_tanh=actor_use_tanh,
+            encoder_kwargs=encoder_kwargs,
+        ).float().to(self.device)
+        self.actor = native_actor
+        self.is_recurrent = False
+        self.uses_stochastic_head = True
+        self.rnn_horizon = 0
+        self.learned_log_std = None
+        self.behavior_log_std = None
+        self._rollout_rnn_state = None
+        self._base_rollout_rnn_state = None
+        self.behavior_actor = deepcopy(self.actor).float().to(self.device)
+        self.behavior_actor.eval()
+        for param in self.behavior_actor.parameters():
+            param.requires_grad_(False)
 
     def q_parameters(self) -> list[nn.Parameter]:
         params: list[nn.Parameter] = []
