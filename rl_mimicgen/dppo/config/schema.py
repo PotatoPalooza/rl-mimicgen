@@ -46,6 +46,23 @@ class DPPOTrainConfig:
 
 
 @dataclass
+class DPPOOnlineConfig:
+    rollout_steps: int = 16
+    update_epochs: int = 2
+    num_minibatches: int = 1
+    actor_learning_rate: float = 1e-4
+    critic_learning_rate: float = 1e-3
+    weight_decay: float = 0.0
+    gamma: float = 0.99
+    gae_lambda: float = 0.95
+    clip_ratio: float = 0.2
+    value_loss_coef: float = 0.5
+    gamma_denoising: float = 1.0
+    max_grad_norm: float = 0.5
+    target_kl: float | None = None
+
+
+@dataclass
 class DPPORunConfig:
     task: str = ""
     variant: str = ""
@@ -54,6 +71,7 @@ class DPPORunConfig:
     dataset: DPPODatasetConfig = field(default_factory=DPPODatasetConfig)
     diffusion: DPPODiffusionConfig = field(default_factory=DPPODiffusionConfig)
     training: DPPOTrainConfig = field(default_factory=DPPOTrainConfig)
+    online: DPPOOnlineConfig = field(default_factory=DPPOOnlineConfig)
     output_dir: str = "logs/dppo"
     train_steps: int = 0
     num_envs: int = 1
@@ -69,6 +87,7 @@ class DPPORunConfig:
                 "dataset": DPPODatasetConfig(**data.get("dataset", {})),
                 "diffusion": DPPODiffusionConfig(**data.get("diffusion", {})),
                 "training": DPPOTrainConfig(**data.get("training", {})),
+                "online": DPPOOnlineConfig(**data.get("online", {})),
             }
         )
 
