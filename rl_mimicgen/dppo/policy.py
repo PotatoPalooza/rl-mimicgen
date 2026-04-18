@@ -58,9 +58,14 @@ class DiffusionPolicyAdapter(nn.Module):
         self.min_logprob_denoising_std = 1e-3
 
         checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
-        state_dict = checkpoint["ema"] if "ema" in checkpoint else checkpoint["model"]
-        self._load_actor_state_dict(state_dict)
-        self.ema_actor.load_state_dict(self.actor.state_dict(), strict=False)
+        actor_state, ema_state, critic_state = self._extract_checkpoint_state(checkpoint)
+        self._load_actor_state_dict(actor_state)
+        if ema_state is not None:
+            self.ema_actor.load_state_dict(ema_state, strict=False)
+        else:
+            self.ema_actor.load_state_dict(self.actor.state_dict(), strict=False)
+        if critic_state is not None:
+            self.value_net.load_state_dict(critic_state, strict=False)
         self.actor.eval()
         self.value_net.train()
 
@@ -82,6 +87,20 @@ class DiffusionPolicyAdapter(nn.Module):
         disallowed_missing = missing - allowed_missing
         if disallowed_missing:
             raise RuntimeError(f"Missing required checkpoint keys: {sorted(disallowed_missing)}")
+
+    def _extract_checkpoint_state(
+        self,
+        checkpoint: dict[str, Any],
+    ) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor] | None, dict[str, torch.Tensor] | None]:
+        if "actor" in checkpoint:
+            actor_state = checkpoint["actor"]
+            ema_state = checkpoint.get("ema_actor")
+            critic_state = checkpoint.get("critic")
+            return actor_state, ema_state, critic_state
+        if "ema" in checkpoint or "model" in checkpoint:
+            actor_state = checkpoint["ema"] if "ema" in checkpoint else checkpoint["model"]
+            return actor_state, None, None
+        raise RuntimeError(f"Unsupported checkpoint format with keys: {sorted(checkpoint.keys())}")
 
     def actor_parameters(self) -> list[nn.Parameter]:
         return list(self.actor.parameters())
