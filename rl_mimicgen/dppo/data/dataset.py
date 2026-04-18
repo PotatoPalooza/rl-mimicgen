@@ -11,8 +11,14 @@ import numpy as np
 class DPPONormalizationStats:
     obs_mean: np.ndarray
     obs_std: np.ndarray
+    obs_min: np.ndarray
+    obs_max: np.ndarray
+    obs_range: np.ndarray
     action_mean: np.ndarray
     action_std: np.ndarray
+    action_min: np.ndarray
+    action_max: np.ndarray
+    action_range: np.ndarray
 
     @classmethod
     def load(cls, bundle_dir: str | Path) -> "DPPONormalizationStats":
@@ -20,8 +26,14 @@ class DPPONormalizationStats:
         return cls(
             obs_mean=np.asarray(stats["obs_mean"], dtype=np.float32),
             obs_std=np.asarray(stats["obs_std"], dtype=np.float32),
+            obs_min=np.asarray(stats["obs_min"], dtype=np.float32),
+            obs_max=np.asarray(stats["obs_max"], dtype=np.float32),
+            obs_range=np.asarray(stats["obs_range"], dtype=np.float32),
             action_mean=np.asarray(stats["action_mean"], dtype=np.float32),
             action_std=np.asarray(stats["action_std"], dtype=np.float32),
+            action_min=np.asarray(stats["action_min"], dtype=np.float32),
+            action_max=np.asarray(stats["action_max"], dtype=np.float32),
+            action_range=np.asarray(stats["action_range"], dtype=np.float32),
         )
 
 

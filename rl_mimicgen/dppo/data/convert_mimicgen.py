@@ -40,6 +40,12 @@ def _safe_std(array: np.ndarray) -> np.ndarray:
     return std.astype(np.float32, copy=False)
 
 
+def _safe_range(min_value: np.ndarray, max_value: np.ndarray) -> np.ndarray:
+    value_range = max_value - min_value
+    value_range[value_range < 1e-6] = 1.0
+    return value_range.astype(np.float32, copy=False)
+
+
 def convert_dataset(
     source_hdf5: Path,
     output_dir: Path,
@@ -132,8 +138,14 @@ def convert_dataset(
             output_dir / "normalization.npz",
             obs_mean=obs.mean(axis=0).astype(np.float32),
             obs_std=_safe_std(obs),
+            obs_min=obs.min(axis=0).astype(np.float32),
+            obs_max=obs.max(axis=0).astype(np.float32),
+            obs_range=_safe_range(obs.min(axis=0), obs.max(axis=0)),
             action_mean=actions.mean(axis=0).astype(np.float32),
             action_std=_safe_std(actions),
+            action_min=actions.min(axis=0).astype(np.float32),
+            action_max=actions.max(axis=0).astype(np.float32),
+            action_range=_safe_range(actions.min(axis=0), actions.max(axis=0)),
         )
         with open(output_dir / "metadata.json", "w", encoding="utf-8") as file_obj:
             json.dump(metadata, file_obj, indent=2)

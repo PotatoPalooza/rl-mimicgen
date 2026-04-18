@@ -16,15 +16,45 @@ class DPPODatasetConfig:
 
 
 @dataclass
+class DPPODiffusionConfig:
+    horizon_steps: int = 4
+    cond_steps: int = 1
+    denoising_steps: int = 20
+    predict_epsilon: bool = True
+    denoised_clip_value: float | None = 1.0
+    time_dim: int = 16
+    mlp_dims: tuple[int, ...] = (512, 512, 512)
+    residual_style: bool = True
+
+
+@dataclass
+class DPPOTrainConfig:
+    epochs: int = 3000
+    batch_size: int = 256
+    learning_rate: float = 1e-4
+    weight_decay: float = 1e-6
+    lr_warmup_steps: int = 100
+    lr_min: float = 1e-5
+    save_every_n_epochs: int = 500
+    log_every_n_epochs: int = 1
+    update_ema_every_n_steps: int = 10
+    ema_decay: float = 0.995
+    ema_start_epoch: int = 1
+    normalize_dataset: bool = True
+    num_workers: int = 0
+
+
+@dataclass
 class DPPORunConfig:
     task: str = ""
     variant: str = ""
     seed: int = 0
     device: str = "cuda"
     dataset: DPPODatasetConfig = field(default_factory=DPPODatasetConfig)
+    diffusion: DPPODiffusionConfig = field(default_factory=DPPODiffusionConfig)
+    training: DPPOTrainConfig = field(default_factory=DPPOTrainConfig)
     output_dir: str = "logs/dppo"
     train_steps: int = 0
-    batch_size: int = 256
     num_envs: int = 1
     checkpoint_path: str | None = None
 
@@ -36,6 +66,8 @@ class DPPORunConfig:
             **{
                 **data,
                 "dataset": DPPODatasetConfig(**data.get("dataset", {})),
+                "diffusion": DPPODiffusionConfig(**data.get("diffusion", {})),
+                "training": DPPOTrainConfig(**data.get("training", {})),
             }
         )
 
