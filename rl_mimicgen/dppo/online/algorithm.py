@@ -181,14 +181,11 @@ class DiffusionPPO:
         }
 
     def _slice_batch(self, batch: DiffusionRolloutBatch, decision_indices: torch.Tensor) -> dict[str, Any]:
-        reward_horizon = self.policy.act_steps if self.act_steps is None else self.act_steps
-        action_start = self.policy.observation_horizon - 1
-        action_end = action_start + reward_horizon
         return {
             "observations": {key: value[decision_indices] for key, value in batch.observations.items()},
             "goals": None if batch.goals is None else {key: value[decision_indices] for key, value in batch.goals.items()},
-            "chain_prev": batch.chain_samples[decision_indices, :, action_start:action_end],
-            "chain_next": batch.chain_next_samples[decision_indices, :, action_start:action_end],
+            "chain_prev": batch.chain_samples[decision_indices],
+            "chain_next": batch.chain_next_samples[decision_indices],
             "timesteps": batch.chain_timesteps[decision_indices],
             "log_probs": batch.log_probs[decision_indices],
             "returns": batch.returns[decision_indices],
