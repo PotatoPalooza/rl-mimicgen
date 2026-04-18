@@ -214,6 +214,7 @@ robomimic
 robosuite
 robosuite-task-zoo
 mimicgen
+dppo
 
 uv.lock
 analysis

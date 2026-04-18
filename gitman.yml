@@ -18,3 +18,7 @@ sources:
   - name: mimicgen
     repo: https://github.com/NVlabs/mimicgen
     rev: main
+
+  - name: dppo
+    repo: https://github.com/irom-princeton/dppo
+    rev: main
