@@ -105,6 +105,16 @@ def _stack_obs(obs_list: list[dict[str, np.ndarray]]) -> dict[str, np.ndarray]:
     return {key: np.stack([obs[key] for obs in obs_list], axis=0) for key in obs_list[0]}
 
 
+def _concat_obs_batches(obs_batches: list[dict[str, np.ndarray]]) -> dict[str, np.ndarray]:
+    return {key: np.concatenate([batch[key] for batch in obs_batches], axis=0) for key in obs_batches[0]}
+
+
+def _concat_goal_batches(goal_batches: list[dict[str, np.ndarray] | None]) -> dict[str, np.ndarray] | None:
+    if any(batch is None for batch in goal_batches):
+        return None
+    return _concat_obs_batches([batch for batch in goal_batches if batch is not None])
+
+
 def _get_env_goal(env: Any) -> dict[str, np.ndarray] | None:
     get_goal = getattr(env, "get_goal", None)
     if not callable(get_goal):
@@ -122,6 +132,8 @@ class SerialRobomimicVectorEnv:
     def __init__(self, env_fns: list[Callable[[], Any]]) -> None:
         self.envs = [fn() for fn in env_fns]
         self.num_envs = len(self.envs)
+        self.num_workers = self.num_envs
+        self.envs_per_worker = 1
         self.device = torch.device("cpu")
         self.cfg = {}
         low, high = self.envs[0].base_env.action_spec
@@ -137,6 +149,7 @@ class SerialRobomimicVectorEnv:
         self._horizons = np.array([int(env.base_env.horizon) for env in self.envs], dtype=np.int32)
         self.max_episode_length = int(self._horizons.max())
         self.episode_length_buf = torch.zeros(self.num_envs, dtype=torch.long)
+        self._latest_goal: dict[str, np.ndarray] | None = None
 
     def reset(self, seed: int | None = None) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
         obs_list = []
@@ -146,7 +159,9 @@ class SerialRobomimicVectorEnv:
             obs_list.append(env.reset())
         self._timesteps[:] = 0
         self.episode_length_buf.zero_()
-        return _stack_obs(obs_list), {}
+        observations = _stack_obs(obs_list)
+        self._latest_goal = self._collect_goals()
+        return observations, {}
 
     def step(self, actions: np.ndarray) -> tuple[dict[str, np.ndarray], np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
         obs_list = []
@@ -176,7 +191,9 @@ class SerialRobomimicVectorEnv:
 
             obs_list.append(obs)
 
-        return _stack_obs(obs_list), rewards, terminated, truncated, {"final_info": final_info}
+        observations = _stack_obs(obs_list)
+        self._latest_goal = self._collect_goals()
+        return observations, rewards, terminated, truncated, {"final_info": final_info}
 
     def close(self) -> None:
         for env in self.envs:
@@ -190,86 +207,121 @@ class SerialRobomimicVectorEnv:
         return TensorDict(tensor_obs, batch_size=[self.num_envs])
 
     def get_goal(self) -> dict[str, np.ndarray] | None:
+        return self._latest_goal
+
+    def _collect_goals(self) -> dict[str, np.ndarray] | None:
         goals = [_get_env_goal(env) for env in self.envs]
         if any(goal is None for goal in goals):
             return None
         return _stack_obs(goals)
 
 
-def _worker(remote, env_fn_bytes: bytes) -> None:
+def _worker(remote, env_fn_bytes_list: list[bytes]) -> None:
     _configure_lightweight_worker()
     _ensure_local_repo_paths()
-    env_fn = cloudpickle.loads(env_fn_bytes)
-    env = env_fn()
-    timestep = 0
-    horizon = int(env.base_env.horizon)
+    env_fns = [cloudpickle.loads(env_fn_bytes) for env_fn_bytes in env_fn_bytes_list]
+    envs = [env_fn() for env_fn in env_fns]
+    timesteps = np.zeros(len(envs), dtype=np.int32)
+    horizons = np.asarray([int(env.base_env.horizon) for env in envs], dtype=np.int32)
     try:
         while True:
             cmd, data = remote.recv()
             if cmd == "metadata":
-                low, high = env.base_env.action_spec
+                low, high = envs[0].base_env.action_spec
+                sample_obs = envs[0].reset()
+                timesteps[0] = 0
                 remote.send(
                     {
                         "action_low": low.astype(np.float32),
                         "action_high": high.astype(np.float32),
-                        "sample_obs": env.reset(),
-                        "horizon": horizon,
+                        "sample_obs": sample_obs,
+                        "horizon": int(horizons.max()),
+                        "num_envs": len(envs),
                     }
                 )
-                timestep = 0
             elif cmd == "reset":
-                if data is not None:
-                    np.random.seed(data)
-                timestep = 0
-                remote.send(env.reset())
+                base_seed = data
+                obs_list = []
+                for env_idx, env in enumerate(envs):
+                    if base_seed is not None:
+                        np.random.seed(base_seed + env_idx)
+                    timesteps[env_idx] = 0
+                    obs_list.append(env.reset())
+                remote.send(
+                    {
+                        "observations": _stack_obs(obs_list),
+                        "goals": _stack_obs(goals) if (goals := [_get_env_goal(env) for env in envs]) and not any(goal is None for goal in goals) else None,
+                    }
+                )
             elif cmd == "step":
-                obs, reward, done, info = env.step(data)
-                timestep += 1
-                success = bool(env.is_success().get("task", False))
-                timeout = bool(getattr(env.base_env, "done", False) or (timestep >= horizon))
-                terminated = success
-                truncated = timeout and not success
-                final_info = None
-                if success or timeout or done:
-                    final_info = dict(info)
-                    final_info["success"] = success
-                    final_info["reward"] = float(reward)
-                    obs = env.reset()
-                    timestep = 0
-                remote.send((obs, float(reward), terminated, truncated, final_info))
-            elif cmd == "get_goal":
-                remote.send(_get_env_goal(env))
+                obs_list = []
+                rewards = np.zeros(len(envs), dtype=np.float32)
+                terminated = np.zeros(len(envs), dtype=bool)
+                truncated = np.zeros(len(envs), dtype=bool)
+                final_info: list[dict[str, Any] | None] = [None] * len(envs)
+                for env_idx, (env, action) in enumerate(zip(envs, data, strict=True)):
+                    obs, reward, done, info = env.step(action)
+                    timesteps[env_idx] += 1
+                    success = bool(env.is_success().get("task", False))
+                    timeout = bool(getattr(env.base_env, "done", False) or (timesteps[env_idx] >= horizons[env_idx]))
+                    terminated[env_idx] = success
+                    truncated[env_idx] = timeout and not success
+                    rewards[env_idx] = float(reward)
+                    if success or timeout or done:
+                        final_info[env_idx] = dict(info)
+                        final_info[env_idx]["success"] = success
+                        final_info[env_idx]["reward"] = float(reward)
+                        obs = env.reset()
+                        timesteps[env_idx] = 0
+                    obs_list.append(obs)
+
+                goals = [_get_env_goal(env) for env in envs]
+                remote.send(
+                    {
+                        "observations": _stack_obs(obs_list),
+                        "rewards": rewards,
+                        "terminated": terminated,
+                        "truncated": truncated,
+                        "final_info": final_info,
+                        "goals": _stack_obs(goals) if not any(goal is None for goal in goals) else None,
+                    }
+                )
             elif cmd == "close":
-                close_fn = getattr(env, "close", None)
-                if callable(close_fn):
-                    close_fn()
                 remote.close()
                 break
             else:
                 raise ValueError(f"Unsupported worker command: {cmd}")
     finally:
-        close_fn = getattr(env, "close", None)
-        if callable(close_fn):
-            close_fn()
+        for env in envs:
+            close_fn = getattr(env, "close", None)
+            if callable(close_fn):
+                close_fn()
 
 
 class ParallelRobomimicVectorEnv:
-    def __init__(self, env_fns: list[Callable[[], Any]], start_method: str = "spawn") -> None:
+    def __init__(self, env_fns: list[Callable[[], Any]], start_method: str = "spawn", envs_per_worker: int = 1) -> None:
         self.num_envs = len(env_fns)
+        self.envs_per_worker = max(1, int(envs_per_worker))
         self.device = torch.device("cpu")
         self.cfg = {}
+        self._latest_goal: dict[str, np.ndarray] | None = None
         ctx = mp.get_context(start_method)
         self.remotes = []
         self.processes = []
+        self.worker_env_counts: list[int] = []
         try:
-            for env_fn in env_fns:
+            for worker_env_fns in self._chunk_env_fns(env_fns):
                 parent_remote, child_remote = ctx.Pipe()
-                process = ctx.Process(target=_worker, args=(child_remote, cloudpickle.dumps(env_fn)))
+                process = ctx.Process(
+                    target=_worker,
+                    args=(child_remote, [cloudpickle.dumps(env_fn) for env_fn in worker_env_fns]),
+                )
                 process.daemon = True
                 process.start()
                 child_remote.close()
                 self.remotes.append(parent_remote)
                 self.processes.append(process)
+                self.worker_env_counts.append(len(worker_env_fns))
 
             self.remotes[0].send(("metadata", None))
             metadata = self.remotes[0].recv()
@@ -282,6 +334,7 @@ class ParallelRobomimicVectorEnv:
             self.single_observation_space = {key: value.shape for key, value in metadata["sample_obs"].items()}
             self.max_episode_length = int(metadata["horizon"])
             self.episode_length_buf = torch.zeros(self.num_envs, dtype=torch.long)
+            self.num_workers = len(self.remotes)
 
             for remote in self.remotes[1:]:
                 remote.send(("reset", None))
@@ -291,27 +344,34 @@ class ParallelRobomimicVectorEnv:
             raise
 
     def reset(self, seed: int | None = None) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
-        for idx, remote in enumerate(self.remotes):
-            worker_seed = None if seed is None else seed + idx
+        env_offset = 0
+        for remote, worker_env_count in zip(self.remotes, self.worker_env_counts, strict=True):
+            worker_seed = None if seed is None else seed + env_offset
             remote.send(("reset", worker_seed))
-        obs_list = [remote.recv() for remote in self.remotes]
+            env_offset += worker_env_count
+        results = [remote.recv() for remote in self.remotes]
         self.episode_length_buf.zero_()
-        return _stack_obs(obs_list), {}
+        self._latest_goal = _concat_goal_batches([result["goals"] for result in results])
+        return _concat_obs_batches([result["observations"] for result in results]), {}
 
     def step(self, actions: np.ndarray) -> tuple[dict[str, np.ndarray], np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
-        for remote, action in zip(self.remotes, actions, strict=True):
-            remote.send(("step", action))
+        action_start = 0
+        for remote, worker_env_count in zip(self.remotes, self.worker_env_counts, strict=True):
+            action_stop = action_start + worker_env_count
+            remote.send(("step", actions[action_start:action_stop]))
+            action_start = action_stop
         results = [remote.recv() for remote in self.remotes]
-        obs_list = [result[0] for result in results]
-        rewards = np.asarray([result[1] for result in results], dtype=np.float32)
-        terminated = np.asarray([result[2] for result in results], dtype=bool)
-        truncated = np.asarray([result[3] for result in results], dtype=bool)
-        final_info = [result[4] for result in results]
+        observations = _concat_obs_batches([result["observations"] for result in results])
+        rewards = np.concatenate([result["rewards"] for result in results], axis=0).astype(np.float32, copy=False)
+        terminated = np.concatenate([result["terminated"] for result in results], axis=0).astype(bool, copy=False)
+        truncated = np.concatenate([result["truncated"] for result in results], axis=0).astype(bool, copy=False)
+        final_info = [info for result in results for info in result["final_info"]]
+        self._latest_goal = _concat_goal_batches([result["goals"] for result in results])
         self.episode_length_buf += 1
         for idx, info in enumerate(final_info):
             if info is not None:
                 self.episode_length_buf[idx] = 0
-        return _stack_obs(obs_list), rewards, terminated, truncated, {"final_info": final_info}
+        return observations, rewards, terminated, truncated, {"final_info": final_info}
 
     def close(self) -> None:
         for remote in self.remotes:
@@ -336,12 +396,13 @@ class ParallelRobomimicVectorEnv:
         return TensorDict(tensor_obs, batch_size=[self.num_envs])
 
     def get_goal(self) -> dict[str, np.ndarray] | None:
-        for remote in self.remotes:
-            remote.send(("get_goal", None))
-        goals = [remote.recv() for remote in self.remotes]
-        if any(goal is None for goal in goals):
-            return None
-        return _stack_obs(goals)
+        return self._latest_goal
+
+    def _chunk_env_fns(self, env_fns: list[Callable[[], Any]]) -> list[list[Callable[[], Any]]]:
+        return [
+            env_fns[idx : idx + self.envs_per_worker]
+            for idx in range(0, len(env_fns), self.envs_per_worker)
+        ]
 
 
 def make_robosuite_env_from_checkpoint(

@@ -88,6 +88,9 @@ class OnlinePolicyAdapter(nn.Module):
         self.min_log_std = float(min_log_std)
         if not self.uses_stochastic_head:
             self.learned_log_std = nn.Parameter(torch.full((bundle.shape_meta["ac_dim"],), init_log_std, device=device))
+            self.register_buffer("behavior_log_std", self.learned_log_std.detach().clone())
+        else:
+            self.behavior_log_std = None
 
         self.base_actor = None
         if self.residual_enabled:
@@ -95,6 +98,11 @@ class OnlinePolicyAdapter(nn.Module):
             self.base_actor.eval()
             for param in self.base_actor.parameters():
                 param.requires_grad_(False)
+
+        self.behavior_actor = deepcopy(self.actor).float().to(device)
+        self.behavior_actor.eval()
+        for param in self.behavior_actor.parameters():
+            param.requires_grad_(False)
 
         self._rollout_rnn_state = None
         self._base_rollout_rnn_state = None
@@ -162,9 +170,14 @@ class OnlinePolicyAdapter(nn.Module):
             return None
         return TensorUtils.to_float(TensorUtils.to_device(TensorUtils.to_tensor(filtered), self.device))
 
-    def _make_det_policy_dist(self, mean_action: torch.Tensor) -> TanhWrappedDistribution:
-        assert self.learned_log_std is not None
-        log_std = self.learned_log_std.clamp(min=self.min_log_std)
+    def _make_det_policy_dist(
+        self,
+        mean_action: torch.Tensor,
+        log_std_override: torch.Tensor | None = None,
+    ) -> TanhWrappedDistribution:
+        log_std_source = self.learned_log_std if log_std_override is None else log_std_override
+        assert log_std_source is not None
+        log_std = log_std_source.clamp(min=self.min_log_std)
         base_dist = D.Normal(loc=_atanh(mean_action), scale=log_std.exp().expand_as(mean_action))
         return TanhWrappedDistribution(base_dist=D.Independent(base_dist, 1), scale=1.0)
 
@@ -195,20 +208,21 @@ class OnlinePolicyAdapter(nn.Module):
         obs: dict[str, torch.Tensor],
         goal: dict[str, torch.Tensor] | None,
         rnn_state: Any = None,
+        log_std_override: torch.Tensor | None = None,
     ):
         if self.is_recurrent:
             if self.uses_stochastic_head:
                 dist, next_state = actor_module.forward_train_step(obs_dict=obs, goal_dict=goal, rnn_state=rnn_state)
             else:
                 mean_action, next_state = actor_module.forward_step(obs_dict=obs, goal_dict=goal, rnn_state=rnn_state)
-                dist = self._make_det_policy_dist(mean_action)
+                dist = self._make_det_policy_dist(mean_action, log_std_override=log_std_override)
             return dist, next_state
 
         if self.uses_stochastic_head:
             dist = actor_module.forward_train(obs_dict=obs, goal_dict=goal)
         else:
             mean_action = actor_module(obs_dict=obs, goal_dict=goal)
-            dist = self._make_det_policy_dist(mean_action)
+            dist = self._make_det_policy_dist(mean_action, log_std_override=log_std_override)
         return dist, None
 
     def _init_rnn_state(self, batch_size: int) -> Any:

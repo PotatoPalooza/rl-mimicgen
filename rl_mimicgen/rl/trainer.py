@@ -90,8 +90,12 @@ class OnlineRLTrainer:
             "[env] "
             f"train_backend={self._env_backend_name(self.env)} "
             f"train_num_envs={getattr(self.env, 'num_envs', 1)} "
+            f"train_num_workers={getattr(self.env, 'num_workers', 1)} "
+            f"train_envs_per_worker={getattr(self.env, 'envs_per_worker', 1)} "
             f"eval_backend={self._env_backend_name(self.eval_env)} "
             f"eval_num_envs={getattr(self.eval_env, 'num_envs', 1)} "
+            f"eval_num_workers={getattr(self.eval_env, 'num_workers', 1)} "
+            f"eval_envs_per_worker={getattr(self.eval_env, 'envs_per_worker', 1)} "
             f"device={self.device}"
         )
         action_dim = int(np.prod(self.env.single_action_space.shape))
@@ -168,6 +172,7 @@ class OnlineRLTrainer:
                     beta=self.config.awac.beta,
                     max_weight=self.config.awac.max_weight,
                     normalize_weights=self.config.awac.normalize_weights,
+                    behavior_kl_coef=self.config.awac.behavior_kl_coef,
                     critic_loss_coef=self.config.awac.value_coef,
                     entropy_coef=self.config.awac.entropy_coef,
                     max_grad_norm=self.config.optimizer.max_grad_norm,
@@ -506,6 +511,7 @@ class OnlineRLTrainer:
                 "log_prob_std",
                 "log_prob_min",
                 "log_prob_max",
+                "behavior_kl",
                 "q_pred_mean",
                 "target_q_mean",
                 "q_gap_mean",
@@ -723,7 +729,10 @@ class OnlineRLTrainer:
         dataset_path = self.config.demo.dataset_path or self.bundle.config.train.data
         if dataset_path is None:
             raise ValueError("Demo regularization was enabled, but no dataset path was found in the checkpoint or config.")
+        dataset_path = str(Path(dataset_path).expanduser().resolve())
         self._ensure_demo_dataset_config_defaults()
+        with self.bundle.config.unlocked():
+            self.bundle.config.train.data = [{"path": dataset_path, "weight": 1.0}]
         dataset = dataset_factory(
             config=self.bundle.config,
             obs_keys=self.bundle.config.all_obs_keys,
@@ -920,7 +929,11 @@ class OnlineRLTrainer:
         env_fns = [factory for _ in range(self.config.num_envs)]
         if self.config.robosuite.parallel_envs and self.config.num_envs > 1:
             try:
-                return ParallelRobomimicVectorEnv(env_fns, start_method=self.config.robosuite.start_method)
+                return ParallelRobomimicVectorEnv(
+                    env_fns,
+                    start_method=self.config.robosuite.start_method,
+                    envs_per_worker=self.config.robosuite.envs_per_worker,
+                )
             except (ConnectionResetError, BrokenPipeError, EOFError) as exc:
                 self._emit(
                     "parallel training env startup failed; falling back to serial envs "
@@ -943,7 +956,11 @@ class OnlineRLTrainer:
         env_fns = [factory for _ in range(self.config.evaluation.num_envs)]
         if self.config.robosuite.parallel_envs and self.config.evaluation.num_envs > 1:
             try:
-                return ParallelRobomimicVectorEnv(env_fns, start_method=self.config.robosuite.start_method)
+                return ParallelRobomimicVectorEnv(
+                    env_fns,
+                    start_method=self.config.robosuite.start_method,
+                    envs_per_worker=self.config.robosuite.envs_per_worker,
+                )
             except (ConnectionResetError, BrokenPipeError, EOFError) as exc:
                 self._emit(
                     "parallel eval env startup failed; falling back to serial envs "

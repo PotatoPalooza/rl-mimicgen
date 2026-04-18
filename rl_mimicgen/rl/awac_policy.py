@@ -145,6 +145,68 @@ class AWACPolicyAdapter(OnlinePolicyAdapter):
         flat_mask = mask.reshape(-1)
         return log_probs[flat_mask], entropy[flat_mask]
 
+    def behavior_kl_replay(
+        self,
+        observations: dict[str, torch.Tensor],
+        goals: dict[str, torch.Tensor] | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        current_dist, _ = self._dist_from_step(observations, goals, None)
+        with torch.no_grad():
+            behavior_dist, _ = self._dist_from_actor(
+                self.behavior_actor,
+                observations,
+                goals,
+                None,
+                log_std_override=self.behavior_log_std,
+            )
+            behavior_actions = _sample_from_distribution(behavior_dist)
+            behavior_log_probs = behavior_dist.log_prob(behavior_actions)
+        current_log_probs = current_dist.log_prob(behavior_actions)
+        return behavior_log_probs - current_log_probs, _safe_entropy(current_dist)
+
+    def behavior_kl_replay_sequence(
+        self,
+        observations: dict[str, torch.Tensor],
+        goals: dict[str, torch.Tensor] | None,
+        episode_starts: torch.Tensor,
+        mask: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        rollout_steps, num_envs = next(iter(observations.values())).shape[:2]
+        current_state = None
+        behavior_state = None
+        step_count = 0
+        kl_values = []
+        entropies = []
+        for step in range(rollout_steps):
+            if current_state is None or (self.rnn_horizon > 0 and step_count % self.rnn_horizon == 0):
+                current_state = self._init_rnn_state(batch_size=num_envs)
+                behavior_state = self._init_rnn_state(batch_size=num_envs)
+            reset_mask = episode_starts[step].to(dtype=torch.bool)
+            current_state = self._reset_state_indices(current_state, reset_mask)
+            behavior_state = self._reset_state_indices(behavior_state, reset_mask)
+            obs_batch = {key: value[step] for key, value in observations.items()}
+            goal_batch = None if goals is None else {key: value[step] for key, value in goals.items()}
+            current_dist, current_state = self._dist_from_step(obs_batch, goal_batch, current_state)
+            with torch.no_grad():
+                behavior_dist, behavior_state = self._dist_from_actor(
+                    self.behavior_actor,
+                    obs_batch,
+                    goal_batch,
+                    behavior_state,
+                    log_std_override=self.behavior_log_std,
+                )
+                behavior_actions = _sample_from_distribution(behavior_dist)
+                behavior_log_probs = behavior_dist.log_prob(behavior_actions)
+            current_log_probs = current_dist.log_prob(behavior_actions)
+            kl_values.append(behavior_log_probs - current_log_probs)
+            entropies.append(_safe_entropy(current_dist))
+            step_count += 1
+
+        flat_mask = mask.reshape(-1)
+        flat_kl = _flatten_metric(torch.stack(kl_values, dim=0), rollout_steps, num_envs)
+        flat_entropy = _flatten_metric(torch.stack(entropies, dim=0), rollout_steps, num_envs)
+        return flat_kl[flat_mask], flat_entropy[flat_mask]
+
     def sample_actions_for_value(
         self,
         observations: dict[str, torch.Tensor],
@@ -211,9 +273,48 @@ class AWACPolicyAdapter(OnlinePolicyAdapter):
 
 
 def _safe_entropy(dist) -> torch.Tensor:
-    entropy = dist.entropy()
+    try:
+        entropy = dist.entropy()
+    except NotImplementedError:
+        if hasattr(dist, "base_dist"):
+            entropy = dist.base_dist.entropy()
+        elif hasattr(dist, "component_distribution") and hasattr(dist.component_distribution, "base_dist"):
+            entropy = dist.component_distribution.base_dist.entropy()
+        else:
+            entropy = torch.zeros(tuple(int(x) for x in dist.batch_shape), device=_distribution_device(dist))
     if entropy.ndim == 0:
         return entropy.unsqueeze(0)
     if entropy.ndim > 1:
         entropy = entropy.sum(dim=-1)
     return entropy
+
+
+def _flatten_metric(metric: torch.Tensor, rollout_steps: int, num_envs: int) -> torch.Tensor:
+    if metric.ndim == 0:
+        return metric.unsqueeze(0)
+    if metric.ndim == 1:
+        return metric
+    if metric.shape[0] != rollout_steps or metric.shape[1] != num_envs:
+        metric = metric.reshape(rollout_steps, num_envs, *metric.shape[1:])
+    while metric.ndim > 2:
+        metric = metric.mean(dim=-1)
+    return metric.reshape(-1)
+
+
+def _sample_from_distribution(dist) -> torch.Tensor:
+    if hasattr(dist, "rsample"):
+        try:
+            return dist.rsample()
+        except NotImplementedError:
+            pass
+    return dist.sample()
+
+
+def _distribution_device(dist) -> torch.device:
+    if hasattr(dist, "base_dist") and hasattr(dist.base_dist, "loc"):
+        return dist.base_dist.loc.device
+    if hasattr(dist, "component_distribution"):
+        component = dist.component_distribution
+        if hasattr(component, "base_dist") and hasattr(component.base_dist, "loc"):
+            return component.base_dist.loc.device
+    return torch.device("cpu")

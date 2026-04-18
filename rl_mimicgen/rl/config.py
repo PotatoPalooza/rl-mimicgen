@@ -38,6 +38,7 @@ class AWACConfig:
     beta: float = 1.0
     max_weight: float = 20.0
     normalize_weights: bool = True
+    behavior_kl_coef: float = 0.0
     actor_batch_size: int = 256
     replay_capacity: int = 500000
     q_hidden_sizes: tuple[int, ...] = (256, 256)

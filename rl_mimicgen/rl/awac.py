@@ -29,6 +29,7 @@ class AWAC:
         beta: float = 1.0,
         max_weight: float = 20.0,
         normalize_weights: bool = True,
+        behavior_kl_coef: float = 0.0,
         critic_loss_coef: float = 1.0,
         entropy_coef: float = 0.0,
         max_grad_norm: float = 0.5,
@@ -53,6 +54,7 @@ class AWAC:
             raise ValueError(f"AWAC beta must be positive, got {self.beta}.")
         self.max_weight = float(max_weight)
         self.normalize_weights = bool(normalize_weights)
+        self.behavior_kl_coef = float(behavior_kl_coef)
         self.critic_loss_coef = float(critic_loss_coef)
         self.entropy_coef = float(entropy_coef)
         self.max_grad_norm = float(max_grad_norm)
@@ -131,6 +133,11 @@ class AWAC:
         mean_weight_min = 0.0
         mean_weight_max = 0.0
         mean_clipped_weight_frac = 0.0
+        mean_log_prob = 0.0
+        mean_log_prob_std = 0.0
+        mean_log_prob_min = 0.0
+        mean_log_prob_max = 0.0
+        mean_behavior_kl = 0.0
         num_updates = 0
 
         for _ in range(self.num_learning_epochs):
@@ -159,6 +166,11 @@ class AWAC:
                 mean_weight_min += actor_metrics["weight_min"]
                 mean_weight_max += actor_metrics["weight_max"]
                 mean_clipped_weight_frac += actor_metrics["weight_clipped_frac"]
+                mean_log_prob += actor_metrics["log_prob_mean"]
+                mean_log_prob_std += actor_metrics["log_prob_std"]
+                mean_log_prob_min += actor_metrics["log_prob_min"]
+                mean_log_prob_max += actor_metrics["log_prob_max"]
+                mean_behavior_kl += actor_metrics["behavior_kl"]
                 num_updates += 1
 
         self.update_step += 1
@@ -178,6 +190,11 @@ class AWAC:
             "weight_min": mean_weight_min / denom,
             "weight_max": mean_weight_max / denom,
             "weight_clipped_frac": mean_clipped_weight_frac / denom,
+            "log_prob_mean": mean_log_prob / denom,
+            "log_prob_std": mean_log_prob_std / denom,
+            "log_prob_min": mean_log_prob_min / denom,
+            "log_prob_max": mean_log_prob_max / denom,
+            "behavior_kl": mean_behavior_kl / denom,
             "q_pred_mean": mean_q_pred / denom,
             "target_q_mean": mean_target_q / denom,
             "q_gap_mean": mean_q_gap / denom,
@@ -244,6 +261,13 @@ class AWAC:
             actions=batch.actions,
         )
         actor_loss = -(weights.detach() * current_log_probs).mean()
+        behavior_kl = torch.zeros((), device=self.device)
+        if self.behavior_kl_coef > 0.0:
+            behavior_kl, _ = self.policy.behavior_kl_replay(
+                observations=batch.observations,
+                goals=batch.goals,
+            )
+            behavior_kl = behavior_kl.mean()
 
         demo_loss = torch.zeros((), device=self.device)
         if self.demo_batch_iterator is not None and self.demo_loss_fn is not None and self.demo_coef > 0.0:
@@ -254,6 +278,7 @@ class AWAC:
             demo_loss = self.demo_loss_fn(demo_batch)
 
         loss = actor_loss - (self.entropy_coef * entropy.mean()) + (self.demo_coef * demo_loss)
+        loss = loss + (self.behavior_kl_coef * behavior_kl)
         self.actor_optimizer.zero_grad(set_to_none=True)
         loss.backward()
         nn.utils.clip_grad_norm_(self.policy.actor_parameters(), self.max_grad_norm)
@@ -267,6 +292,7 @@ class AWAC:
             "log_prob_std": float(current_log_probs.std(unbiased=False).item()),
             "log_prob_min": float(current_log_probs.min().item()),
             "log_prob_max": float(current_log_probs.max().item()),
+            "behavior_kl": float(behavior_kl.item()),
             "weight_mean": float(weights.mean().item()),
             "weight_std": float(weights.std(unbiased=False).item()),
             "weight_min": float(weights.min().item()),
@@ -330,6 +356,15 @@ class AWAC:
             mask=sequence_batch.mask,
         )
         actor_loss = -(weights.detach() * current_log_probs).mean()
+        behavior_kl = torch.zeros((), device=self.device)
+        if self.behavior_kl_coef > 0.0:
+            behavior_kl, _ = self.policy.behavior_kl_replay_sequence(
+                observations=sequence_batch.observations,
+                goals=sequence_batch.goals,
+                episode_starts=sequence_batch.episode_starts,
+                mask=sequence_batch.mask,
+            )
+            behavior_kl = behavior_kl.mean()
 
         demo_loss = torch.zeros((), device=self.device)
         if self.demo_batch_iterator is not None and self.demo_loss_fn is not None and self.demo_coef > 0.0:
@@ -340,6 +375,7 @@ class AWAC:
             demo_loss = self.demo_loss_fn(demo_batch)
 
         loss = actor_loss - (self.entropy_coef * entropy.mean()) + (self.demo_coef * demo_loss)
+        loss = loss + (self.behavior_kl_coef * behavior_kl)
         self.actor_optimizer.zero_grad(set_to_none=True)
         loss.backward()
         nn.utils.clip_grad_norm_(self.policy.actor_parameters(), self.max_grad_norm)
@@ -353,6 +389,7 @@ class AWAC:
             "log_prob_std": float(current_log_probs.std(unbiased=False).item()),
             "log_prob_min": float(current_log_probs.min().item()),
             "log_prob_max": float(current_log_probs.max().item()),
+            "behavior_kl": float(behavior_kl.item()),
             "weight_mean": float(weights.mean().item()),
             "weight_std": float(weights.std(unbiased=False).item()),
             "weight_min": float(weights.min().item()),
