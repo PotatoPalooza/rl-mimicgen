@@ -10,9 +10,9 @@ import torch
 from rl_mimicgen.dppo.config.schema import DPPORunConfig
 from rl_mimicgen.dppo.data import DPPODatasetBundle
 from rl_mimicgen.dppo.envs import make_mimicgen_lowdim_env
+from rl_mimicgen.dppo.eval.eval_diffusion_agent import run_evaluation
+from rl_mimicgen.dppo.online import DiffusionPPO, DiffusionRolloutStorage
 from rl_mimicgen.dppo.policy import DiffusionPolicyAdapter
-from rl_mimicgen.rl.diffusion_storage import DiffusionRolloutStorage
-from rl_mimicgen.rl.dppo import DiffusionPPO
 
 
 def build_argument_parser() -> argparse.ArgumentParser:
@@ -20,6 +20,8 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", required=True, help="Path to the DPPO JSON config.")
     parser.add_argument("--checkpoint", default=None, help="Offline checkpoint to fine-tune.")
     parser.add_argument("--rollout_steps", type=int, default=None, help="Number of environment steps to collect for the rollout update.")
+    parser.add_argument("--total_updates", type=int, default=1, help="Number of rollout / update iterations to run.")
+    parser.add_argument("--eval_every", type=int, default=1, help="Run evaluation every N updates.")
     parser.add_argument("--output_dir", default=None, help="Directory to write rollout artifacts.")
     parser.add_argument("--smoke_env_reset", action="store_true", help="Create the low-dim env and run a reset during dry-run validation.")
     parser.add_argument("--dry_run", action="store_true", help="Load config and exit without fine-tuning.")
@@ -84,85 +86,105 @@ def main() -> None:
 
     obs = env.reset()
     episode_starts = np.ones(1, dtype=bool)
-    storage.reset()
-    rollout_env_steps = 0
-    rewards_log: list[float] = []
-    done_count = 0
-    while rollout_env_steps < rollout_target:
-        obs_batch = {key: value[None, ...] for key, value in obs.items()}
-        env_actions, replan_data, completed_envs = policy.act(
-            obs=obs_batch,
-            goal=None,
-            episode_starts=episode_starts,
-            clip_actions=True,
-        )
-        if replan_data is not None:
-            storage.start_decisions(
-                env_indices=replan_data["env_indices"],
-                obs_history=replan_data["obs_history"],
-                goals=replan_data["goals"],
-                chain_samples=replan_data["chain_samples"],
-                chain_next_samples=replan_data["chain_next_samples"],
-                chain_timesteps=replan_data["chain_timesteps"],
-                log_probs=replan_data["log_probs"],
-                values=replan_data["values"],
+    total_env_steps = 0
+    all_metrics: list[dict[str, object]] = []
+    last_batch = None
+    for update_index in range(1, args.total_updates + 1):
+        storage.reset()
+        rollout_env_steps = 0
+        rewards_log: list[float] = []
+        done_count = 0
+        while rollout_env_steps < rollout_target:
+            obs_batch = {key: value[None, ...] for key, value in obs.items()}
+            env_actions, replan_data, completed_envs = policy.act(
+                obs=obs_batch,
+                goal=None,
+                episode_starts=episode_starts,
+                clip_actions=True,
             )
-        next_obs, reward, done, _info = env.step(env_actions[0].astype(np.float32, copy=False))
-        reward_arr = np.asarray([reward], dtype=np.float32)
-        done_arr = np.asarray([float(done)], dtype=np.float32)
-        storage.accumulate_step(rewards=reward_arr, dones=done_arr)
-        finalize_envs = np.union1d(completed_envs, np.asarray([0], dtype=np.int64) if done else np.asarray([], dtype=np.int64))
-        if finalize_envs.size:
-            storage.finalize_decisions(finalize_envs)
-        rewards_log.append(float(reward))
-        rollout_env_steps += 1
-        if done:
-            done_count += 1
-            obs = env.reset()
-            episode_starts = np.ones(1, dtype=bool)
-        else:
-            obs = next_obs
-            episode_starts = np.zeros(1, dtype=bool)
-    last_values = policy.predict_value(obs={key: value[None, ...] for key, value in obs.items()})
-    storage.compute_returns_and_advantages(
-        last_value=last_values,
-        gamma=config.online.gamma,
-        gae_lambda=config.online.gae_lambda,
-    )
-    batch = storage.as_batch()
-    algorithm.set_total_env_steps(rollout_env_steps)
-    update_metrics = algorithm.update(batch)
+            if replan_data is not None:
+                storage.start_decisions(
+                    env_indices=replan_data["env_indices"],
+                    obs_history=replan_data["obs_history"],
+                    goals=replan_data["goals"],
+                    chain_samples=replan_data["chain_samples"],
+                    chain_next_samples=replan_data["chain_next_samples"],
+                    chain_timesteps=replan_data["chain_timesteps"],
+                    log_probs=replan_data["log_probs"],
+                    values=replan_data["values"],
+                )
+            next_obs, reward, done, _info = env.step(env_actions[0].astype(np.float32, copy=False))
+            reward_arr = np.asarray([reward], dtype=np.float32)
+            done_arr = np.asarray([float(done)], dtype=np.float32)
+            storage.accumulate_step(rewards=reward_arr, dones=done_arr)
+            finalize_envs = np.union1d(completed_envs, np.asarray([0], dtype=np.int64) if done else np.asarray([], dtype=np.int64))
+            if finalize_envs.size:
+                storage.finalize_decisions(finalize_envs)
+            rewards_log.append(float(reward))
+            rollout_env_steps += 1
+            total_env_steps += 1
+            if done:
+                done_count += 1
+                obs = env.reset()
+                episode_starts = np.ones(1, dtype=bool)
+            else:
+                obs = next_obs
+                episode_starts = np.zeros(1, dtype=bool)
+
+        last_values = policy.predict_value(obs={key: value[None, ...] for key, value in obs.items()})
+        storage.compute_returns_and_advantages(
+            last_value=last_values,
+            gamma=config.online.gamma,
+            gae_lambda=config.online.gae_lambda,
+        )
+        batch = storage.as_batch()
+        last_batch = batch
+        algorithm.set_total_env_steps(total_env_steps)
+        update_metrics = algorithm.update(batch)
+        metrics: dict[str, object] = {
+            "update_index": update_index,
+            "rollout_steps": rollout_env_steps,
+            "reward_sum": float(np.sum(rewards_log)) if rewards_log else 0.0,
+            "done_count": int(done_count),
+            "checkpoint": checkpoint_path,
+            "update": update_metrics,
+        }
+        if update_index % args.eval_every == 0:
+            eval_metrics = run_evaluation(
+                config=config,
+                dataset=dataset,
+                checkpoint_path=checkpoint_path,
+                actor_override=policy.ema_actor,
+                episodes=1,
+                max_steps=min(env.horizon, rollout_target),
+            )
+            metrics["eval"] = eval_metrics
+        all_metrics.append(metrics)
+        print(json.dumps(metrics, indent=2))
+
+        torch.save(
+            {
+                "actor": policy.actor.state_dict(),
+                "ema_actor": policy.ema_actor.state_dict(),
+                "critic": policy.value_net.state_dict(),
+                "optimizer": algorithm.save(),
+                "config": config.to_dict(),
+            },
+            checkpoint_dir / f"state_{update_index}.pt",
+        )
+
     env.close()
-
-    rollout_metrics = {
-        "rollout_steps": rollout_env_steps,
-        "reward_sum": float(np.sum(rewards_log)) if rewards_log else 0.0,
-        "done_count": int(done_count),
-        "checkpoint": checkpoint_path,
-        "update": update_metrics,
-    }
-    print(json.dumps(rollout_metrics, indent=2))
-
-    torch.save(
-        {
-            "actor": policy.actor.state_dict(),
-            "ema_actor": policy.ema_actor.state_dict(),
-            "critic": policy.value_net.state_dict(),
-            "optimizer": algorithm.save(),
-            "config": config.to_dict(),
-        },
-        checkpoint_dir / "state_1.pt",
-    )
-    np.savez_compressed(
-        output_dir / "bootstrap_rollout.npz",
-        returns=batch.returns.detach().cpu().numpy(),
-        advantages=batch.advantages.detach().cpu().numpy(),
-        values=batch.values.detach().cpu().numpy(),
-        rewards=batch.rewards.detach().cpu().numpy(),
-        dones=batch.dones.detach().cpu().numpy(),
-    )
+    if last_batch is not None:
+        np.savez_compressed(
+            output_dir / "bootstrap_rollout.npz",
+            returns=last_batch.returns.detach().cpu().numpy(),
+            advantages=last_batch.advantages.detach().cpu().numpy(),
+            values=last_batch.values.detach().cpu().numpy(),
+            rewards=last_batch.rewards.detach().cpu().numpy(),
+            dones=last_batch.dones.detach().cpu().numpy(),
+        )
     with open(output_dir / "rollout_metrics.json", "w", encoding="utf-8") as file_obj:
-        json.dump(rollout_metrics, file_obj, indent=2)
+        json.dump(all_metrics, file_obj, indent=2)
 
 
 if __name__ == "__main__":
