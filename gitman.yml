@@ -20,5 +20,5 @@ sources:
     rev: main
 
   - name: dppo
-    repo: https://github.com/irom-princeton/dppo
+    repo: https://github.com/PotatoPalooza/dppo.git
     rev: main
