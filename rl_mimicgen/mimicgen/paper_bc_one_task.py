@@ -109,9 +109,12 @@ class Config:
     warp: bool
     logger: str
     wandb_project: Optional[str]
+    wandb_group: Optional[str]
     wandb_run: Optional[str]
     wandb_model: Optional[str]
     resume: bool
+    async_rollouts: bool
+    rollout_num_envs: Optional[int]
 
     # Pipeline bookkeeping lives under runs/logs/<script>/<stamp>/; training
     # output goes directly under run_root (robomimic's get_exp_dir adds the
@@ -277,6 +280,32 @@ class Runner:
             path.write_text(json.dumps(payload, indent=4) + "\n", encoding="utf-8")
             self.logger.info("Enabled use_warp in %s", config_path)
 
+    def inject_rollout_overrides_into_configs(self, config_paths: list[str]) -> None:
+        """Override ``experiment.rollout.{n, async_enabled}`` per CLI flags.
+
+        ``rollout_num_envs`` drives the warp rollout env count (robomimic reads
+        ``rollout.n`` as ``num_envs`` when ``use_warp`` is set — see
+        ``robomimic/scripts/train.py:342``). ``async_rollouts`` toggles the
+        threaded eval path (``rollout.async_enabled``).
+        """
+        if self.cfg.rollout_num_envs is None and not self.cfg.async_rollouts:
+            return
+        for config_path in config_paths:
+            path = Path(config_path)
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            rollout_cfg = payload.setdefault("experiment", {}).setdefault("rollout", {})
+            if self.cfg.rollout_num_envs is not None:
+                rollout_cfg["n"] = int(self.cfg.rollout_num_envs)
+            if self.cfg.async_rollouts:
+                rollout_cfg["async_enabled"] = True
+            path.write_text(json.dumps(payload, indent=4) + "\n", encoding="utf-8")
+            self.logger.info(
+                "Rollout overrides in %s: n=%s async_enabled=%s",
+                config_path,
+                rollout_cfg.get("n"),
+                rollout_cfg.get("async_enabled", False),
+            )
+
     def inject_wandb_into_configs(self, config_paths: list[str]) -> None:
         """Enable wandb logging in each generated training config.
 
@@ -291,7 +320,7 @@ class Runner:
             modality = self.modality_from_payload(payload) or "low_dim"
             variant = self.variant_from_payload(payload)
             project = self.cfg.wandb_project or f"{self.cfg.task}_{modality}"
-            group = variant.lower() if variant else None
+            group = self.cfg.wandb_group or (variant.lower() if variant else None)
 
             logging_cfg = payload.setdefault("experiment", {}).setdefault("logging", {})
             logging_cfg["log_wandb"] = True
@@ -308,6 +337,7 @@ class Runner:
         config_paths = self.filter_training_configs(config_paths)
         if self.cfg.warp:
             self.inject_warp_into_configs(config_paths)
+        self.inject_rollout_overrides_into_configs(config_paths)
         if self.cfg.logger == "wandb":
             self.inject_wandb_into_configs(config_paths)
         if self.cfg.wandb_run is not None and len(config_paths) > 1:
@@ -714,6 +744,23 @@ def parse_args(argv: Optional[list[str]] = None) -> Config:
         help="Override wandb project name (default: <task>_<modality>, e.g. coffee_low_dim).",
     )
     parser.add_argument(
+        "--wandb-group",
+        default=os.environ.get("WANDB_GROUP"),
+        help="Override wandb group (default: dataset variant, e.g. d0). Use to link BC+RL runs.",
+    )
+    parser.add_argument(
+        "--rollout-num-envs",
+        type=int,
+        default=(int(os.environ["ROLLOUT_NUM_ENVS"]) if os.environ.get("ROLLOUT_NUM_ENVS") else None),
+        help="Override experiment.rollout.n (warp env count for BC rollouts). Default: robomimic preset (50).",
+    )
+    add_bool_arg(
+        parser,
+        "async-rollouts",
+        env_bool("ASYNC_ROLLOUTS", False),
+        "Enable experiment.rollout.async_enabled in generated configs (threaded eval rollouts).",
+    )
+    parser.add_argument(
         "--wandb_run",
         default=os.environ.get("WANDB_RUN"),
         help="Resume training from a checkpoint logged by this wandb run "
@@ -768,9 +815,12 @@ def parse_args(argv: Optional[list[str]] = None) -> Config:
         warp=args.warp,
         logger=args.logger,
         wandb_project=args.wandb_project,
+        wandb_group=args.wandb_group,
         wandb_run=args.wandb_run,
         wandb_model=args.wandb_model,
         resume=args.resume,
+        async_rollouts=args.async_rollouts,
+        rollout_num_envs=args.rollout_num_envs,
     )
 
 

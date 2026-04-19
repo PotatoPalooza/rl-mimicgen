@@ -18,6 +18,8 @@ Options:
   --every-n N             Optional sweep checkpoint stride override. Default: 2
   --n-episodes N          Optional sweep completed-episode override. Default: 10
   --checkpoint-dir PATH   Optional checkpoint directory to sweep.
+  --group GROUP           Optional wandb group tag (default: variant suffix of
+                          --task, e.g. stack_d0 -> d0). Links BC + RL runs.
   --help                  Show this help.
 
 Examples:
@@ -30,6 +32,7 @@ TASK=""
 EVERY_N="2"
 N_EPISODES="10"
 CHECKPOINT_DIR=""
+GROUP=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -47,6 +50,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --checkpoint-dir)
       CHECKPOINT_DIR="$2"
+      shift 2
+      ;;
+    --group)
+      GROUP="$2"
       shift 2
       ;;
     --help)
@@ -70,6 +77,11 @@ fi
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-$REPO_ROOT/.venv/bin/python}"
 LAUNCHER="$REPO_ROOT/scripts/run_official_dppo_mimicgen.py"
+
+if [[ -n "$GROUP" ]]; then
+  export WANDB_RUN_GROUP="$GROUP"
+  echo "==> wandb group: $GROUP"
+fi
 
 task_name="$(basename "$TASK")"
 task_name="${task_name%.yaml}"
