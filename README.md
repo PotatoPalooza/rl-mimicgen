@@ -267,6 +267,7 @@ Note:
 - `stack_d0` is configured centrally in `configs/mimicgen_tasks/stack_d0.yaml`
 - the launcher snapshots the resolved run config into each run directory
 - `prepare --task stack_d0` requires `runs/datasets/core/stack_d0.hdf5` to exist locally
+- sweep runs default to `40` evaluation episodes unless you override `--n-episodes`
 - the full workflow doc is in `docs/official_dppo_mimicgen_workflow.md`
 
 ## Analyze Logs

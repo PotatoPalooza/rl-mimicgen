@@ -16,19 +16,19 @@ Runs the official low-dim DPPO pipeline for one MimicGen task:
 Options:
   --task TASK             Required task id or path to a task spec YAML.
   --every-n N             Optional sweep checkpoint stride override. Default: 2
-  --n-episodes N          Optional sweep completed-episode override. Default: 10
+  --n-episodes N          Optional sweep completed-episode override. Default: 40
   --checkpoint-dir PATH   Optional checkpoint directory to sweep.
   --help                  Show this help.
 
 Examples:
   scripts/run_dppo_bc_to_rl.sh --task coffee_d1
-  scripts/run_dppo_bc_to_rl.sh --task square_d0 --every-n 2 --n-episodes 20
+  scripts/run_dppo_bc_to_rl.sh --task square_d0 --every-n 2 --n-episodes 40
 EOF
 }
 
 TASK=""
 EVERY_N="2"
-N_EPISODES="10"
+N_EPISODES="40"
 CHECKPOINT_DIR=""
 
 while [[ $# -gt 0 ]]; do

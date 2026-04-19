@@ -90,7 +90,7 @@ finetune:
 
 eval_bc:
   config:
-    n_episodes: 20
+    n_episodes: 200
     env:
       n_envs: 20
 
@@ -104,7 +104,7 @@ sweep:
   eval_mode: bc
   device: cpu
   n_envs: 20
-  n_episodes: 20
+  n_episodes: 40
   n_steps: 400
   max_episode_steps: 400
   video_checkpoints: none
@@ -212,11 +212,15 @@ Two eval surfaces are generated on purpose.
 - also targets a fixed number of completed episodes
 - use this when you want a number that should line up with RL iteration 0
 
-The default generated low-dim eval config now uses `n_episodes: 20`.
+The default generated low-dim eval configs now use:
+
+- `eval_bc`: `n_episodes: 200`
+- `eval_rl_init`: `n_episodes: 20`
 
 That is the right default for fast comparison against robomimic-style evaluation because:
 
-- many robomimic-style logs in this repo report `evaluated_episodes=20`
+- `eval_bc` is meant to be the more comprehensive post-sweep confirmation pass
+- many robomimic-style logs in this repo report `evaluated_episodes=20`, so `eval_rl_init` stays aligned with that faster comparison surface
 - `n_episodes` is the apples-to-apples quantity; `n_envs` is only parallelism
 - `n_steps` remains in the config as a safety cap, but eval stops early once the target episode count is reached
 

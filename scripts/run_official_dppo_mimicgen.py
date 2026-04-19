@@ -491,7 +491,7 @@ def _run_sweep(args: argparse.Namespace) -> None:
         "--n-envs",
         str(sweep_cfg.get("n_envs", 8)),
         "--n-episodes",
-        str(args.n_episodes if args.n_episodes is not None else sweep_cfg.get("n_episodes", cfg.get("n_episodes", 20))),
+        str(args.n_episodes if args.n_episodes is not None else sweep_cfg.get("n_episodes", cfg.get("n_episodes", 40))),
         "--n-steps",
         str(sweep_cfg.get("n_steps", materialized["spec"].horizon)),
         "--max-episode-steps",
