@@ -5,16 +5,15 @@ These override the class-level defaults on ``MjSimWarp`` (3500 / 60) via
 on ``MjSimWarp._ACTIVE_*`` (see
 ``resources/robosuite/robosuite/environments/base.py``).
 
-**RL-only, not BC**. An A/B test showed that shrinking these caps — even when
-no overflow ever occurs — selects different JIT-specialised mujoco-warp
-kernels with slightly different f32 numerical behaviour. A trained policy
-doesn't care, but early-training BC rollouts can destabilise (machine jitters
-off the table, SR drops). RL fine-tuning starts from a trained BC policy, so
-it tolerates the kernel-variant drift. BC-time rollouts keep the class
-defaults.
-
-Values here come from ``rl_mimicgen.rsl_rl.bench_jmax_audit``; set the cap to
-the observed peak x ~3 (headroom for RL exploration).
+**Currently empty.** An earlier audit on Coffee_D0 (model_2000, 2048 envs)
+observed peak ``nefc=150`` and suggested ``(500, 15)`` with ~3x headroom.
+``bench_caps_sweep`` (256 envs, model_2000, 2026-04-18) then showed that
+shrunk caps cause silent overflow during the rollout: at 500/15 the sim
+clipped nefc on 10 steps and insertion rate collapsed 0.883 -> 0.246. The
+earlier audit only measured peak ``nefc`` under the 3500-cap kernel variant
+- once caps shrink, physics diverges and contacts spawn past the audit's
+observed peak. Positive-feedback failure. Leaving class defaults in place
+until a more robust audit methodology exists.
 """
 
 from __future__ import annotations
@@ -23,17 +22,12 @@ import re
 from typing import Optional
 
 
-# Keyed by the MimicGen short task name ("coffee", "three_piece_assembly",
-# ...). Matched against the robosuite env_name by stripping underscores and
-# comparing as a prefix, with the constraint that the trailing chars must be
-# a variant suffix (``d<N>`` / ``o<N>``) or end-of-string — so ``coffee`` does
-# **not** match ``CoffeePreparation_D0``.
-PER_TASK_WARP_BUFFER_SIZES: dict[str, dict[str, int]] = {
-    # Coffee_D0 audit (bench_jmax_audit on BC model_2000, 2048 envs, 400 steps,
-    # 2026-04-17): peak per-world nefc=150, peak per-env nacon=5.1.
-    # ~3x headroom for RL exploration.
-    "coffee": {"njmax_per_env": 500, "naconmax_per_env": 15},
-}
+# Keyed by the MimicGen short task name. Matched against the robosuite
+# env_name by stripping underscores and comparing as a prefix, with the
+# constraint that the trailing chars must be a variant suffix (``d<N>`` /
+# ``o<N>``) or end-of-string - so ``coffee`` does **not** match
+# ``CoffeePreparation_D0``.
+PER_TASK_WARP_BUFFER_SIZES: dict[str, dict[str, int]] = {}
 
 
 _VARIANT_SUFFIX_RE = re.compile(r"^(d\d+|o\d+)?$")

@@ -179,10 +179,11 @@ def parse_args():
                              "video.enabled (default true). Pass --no-video to disable. "
                              "Framing (width/height/fps/camera) lives in the 'video' config block.")
     parser.add_argument("--video_interval", type=int, default=None,
-                        help="Minimum env-steps between recorded clips. Recording is armed once "
-                             "the interval elapses, and capture starts at the next env-0 episode "
-                             "boundary. Defaults to video.interval in the config, or "
-                             "num_steps_per_env * save_interval if neither is set.")
+                        help="Minimum learning iterations between recorded clips (internally "
+                             "multiplied by num_steps_per_env). Recording is armed once the "
+                             "interval elapses, and capture starts at the next env-0 episode "
+                             "boundary. Defaults to video.interval in the config (100 iters), "
+                             "or save_interval if neither is set.")
 
     return parser.parse_args()
 
@@ -462,15 +463,16 @@ def main():
     video_trigger: Optional[Callable[[int], bool]] = None
     if video_enabled:
         if args.video_interval is not None:
-            video_interval = args.video_interval
+            video_interval_iters = args.video_interval
         elif video_cfg.get("interval") is not None:
-            video_interval = int(video_cfg["interval"])
+            video_interval_iters = int(video_cfg["interval"])
         else:
-            video_interval = train_cfg["num_steps_per_env"] * train_cfg["save_interval"]
-        video_interval = max(1, video_interval)
+            video_interval_iters = train_cfg["save_interval"]
+        video_interval_iters = max(1, video_interval_iters)
+        video_interval = video_interval_iters * train_cfg["num_steps_per_env"]
         video_trigger = lambda s: s % video_interval == 0  # noqa: E731
-        print(f"[INFO] Video: arming every {video_interval} env steps; "
-              f"each clip starts at the next env-0 episode boundary")
+        print(f"[INFO] Video: arming every {video_interval_iters} learning iterations "
+              f"({video_interval} env steps); each clip starts at the next env-0 episode boundary")
 
     vec_env = RobomimicVecEnv(
         env=env,

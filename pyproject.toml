@@ -12,6 +12,8 @@ dependencies = [
   "robosuite",
   "robomimic",
   "mujoco-warp==3.6.0",
+  "rsl-rl-lib==5.0.1",
+  "wandb==0.26.0",
 ]
 
 [dependency-groups]

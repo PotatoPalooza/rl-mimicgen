@@ -55,13 +55,15 @@
   },
   "video": {
     "enabled": true,
+    "interval": 100,
     "width": 512,
     "height": 512,
     "fps": 20,
     "camera": null
   },
   "env_kwargs": {
-    "extra_randomization": true,
-    "tipover_prob": 0.0
+    "extra_randomization": false,
+    "tipover_prob": 0.0,
+    "fall_off_termination": true
   }
 }
