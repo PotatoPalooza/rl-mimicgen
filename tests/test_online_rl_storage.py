@@ -30,4 +30,8 @@ def test_rollout_storage_preserves_sequence_axes_and_flattens_scalar_targets() -
     assert batch.actions.shape == (2, 3, 2)
     assert batch.log_probs.shape == (6,)
     assert batch.returns.shape == (6,)
+    assert batch.raw_advantages is not None
+    assert batch.raw_advantages.shape == (6,)
+    assert torch.abs(batch.raw_advantages.mean()) > 0.0
+    assert torch.isclose(batch.advantages.mean(), torch.tensor(0.0), atol=1e-6)
     assert batch.observations["obs"].shape == (2, 3, 4)
