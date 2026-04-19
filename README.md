@@ -129,17 +129,28 @@ If they are not already there, you will need to either:
 - run the dataset download / generation flow for this repo, or
 - move / copy the HDF5 files into `runs/datasets/core/` on the new machine
 
-One way to populate those datasets is to use the existing MimicGen training bootstrap without `--no-download-datasets`, for example:
+To install datasets into the default repo location:
+
+- dataset root: `runs/datasets/`
+- released core HDF5s land under: `runs/datasets/core/`
+
+Download one specific dataset family / variant into that default location without launching training:
 
 ```bash
 cd /path/to/rl-mimicgen
-bash scripts/mimicgen_train_bc.sh \
-  --task square \
-  --variant D0 \
-  --modality low_dim
+bash scripts/install_mimicgen_datasets.sh --task square --variant D0
 ```
 
-That path will download / prepare the underlying MimicGen data if it is not already present. If you already have the `.hdf5` files from another machine, copying them into `runs/datasets/core/` is simpler.
+Download all released core dataset families into that same default location:
+
+```bash
+cd /path/to/rl-mimicgen
+bash scripts/install_mimicgen_datasets.sh --all-core
+```
+
+Those commands only download / prepare the released MimicGen datasets into `runs/datasets/core/`. They do not launch BC training.
+
+If you already have the `.hdf5` files from another machine, copying them into `runs/datasets/core/` is simpler.
 
 Examples:
 
