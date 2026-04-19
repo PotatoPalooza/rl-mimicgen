@@ -536,6 +536,32 @@ def write_official_dppo_lowdim_configs(
     return written
 
 
+def write_task_manifest(
+    spec: MimicGenLowDimSpec,
+    *,
+    artifact_dir: str | Path,
+    config_dir: str | Path,
+    log_root: str | Path,
+    config_files: dict[str, Path],
+) -> Path:
+    manifest = {
+        "dataset_id": spec.dataset_id,
+        "source_hdf5": spec.source_hdf5.as_posix(),
+        "artifact_dir": Path(artifact_dir).expanduser().resolve().as_posix(),
+        "config_dir": Path(config_dir).expanduser().resolve().as_posix(),
+        "log_root": Path(log_root).expanduser().resolve().as_posix(),
+        "env_name": spec.env_name,
+        "obs_dim": spec.obs_dim,
+        "action_dim": spec.action_dim,
+        "horizon": spec.horizon,
+        "low_dim_keys": list(spec.low_dim_keys),
+        "configs": {name: path.as_posix() for name, path in config_files.items()},
+    }
+    target = Path(config_dir).expanduser().resolve() / "task_manifest.json"
+    target.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    return target
+
+
 def materialize_mimicgen_lowdim_port(
     source_hdf5: str | Path,
     *,
@@ -663,12 +689,20 @@ def materialize_mimicgen_lowdim_port(
         log_root=log_root_path,
         wandb_entity=wandb_entity,
     )
+    manifest_path = write_task_manifest(
+        spec,
+        artifact_dir=artifact_dir,
+        config_dir=config_dir,
+        log_root=log_root_path,
+        config_files=written_configs,
+    )
     return {
         "spec": spec,
         "artifact_dir": artifact_dir,
         "config_dir": config_dir,
         "log_root": log_root_path,
         "configs": written_configs,
+        "task_manifest": manifest_path,
     }
 
 
