@@ -216,6 +216,13 @@ robosuite-task-zoo
 mimicgen
 dppo
 
+# Machine-local DPPO / MimicGen experiment artifacts
+runs/official_dppo_mimicgen/
+logs/official_dppo/mimicgen/
+state/
+wandb/
+dppo/cfg/mimicgen/generated/
+
 uv.lock
 analysis
 config

@@ -469,6 +469,23 @@ def _run_sweep(args: argparse.Namespace) -> None:
         check=True,
         env=_subprocess_env(task_spec, for_video=str(sweep_cfg.get("video_checkpoints", "none")) != "none", run_dir=run_dir),
     )
+    best_summary_path = run_dir / "best_checkpoint.json"
+    best_summary = json.loads(best_summary_path.read_text(encoding="utf-8")) if best_summary_path.exists() else {}
+    print(
+        json.dumps(
+            {
+                "dataset_id": dataset_id,
+                "stage": "sweep",
+                "eval_mode": eval_mode,
+                "run_dir": run_dir.as_posix(),
+                "run_manifest_path": (run_dir / "run_manifest.json").as_posix(),
+                "best_checkpoint": best_summary.get("best_checkpoint"),
+                "best_checkpoint_copy": best_summary.get("best_checkpoint_copy"),
+                "best_checkpoint_summary_path": best_summary_path.as_posix(),
+            },
+            indent=2,
+        )
+    )
 
 
 def main() -> None:

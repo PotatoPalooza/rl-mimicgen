@@ -2,6 +2,14 @@
 
 ## Official DPPO: MimicGen `coffee_d0` low-dim
 
+Preferred task-spec workflow:
+
+```bash
+cd /home/nelly/projects/rl-mimicgen
+.venv/bin/python scripts/run_official_dppo_mimicgen.py prepare --task coffee_d0
+.venv/bin/python scripts/run_official_dppo_mimicgen.py pretrain --task coffee_d0
+```
+
 Materialize the official-DPPO-compatible dataset bundle and generated config:
 
 ```bash

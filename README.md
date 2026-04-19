@@ -129,6 +129,18 @@ If they are not already there, you will need to either:
 - run the dataset download / generation flow for this repo, or
 - move / copy the HDF5 files into `runs/datasets/core/` on the new machine
 
+One way to populate those datasets is to use the existing MimicGen training bootstrap without `--no-download-datasets`, for example:
+
+```bash
+cd /path/to/rl-mimicgen
+bash scripts/mimicgen_train_bc.sh \
+  --task square \
+  --variant D0 \
+  --modality low_dim
+```
+
+That path will download / prepare the underlying MimicGen data if it is not already present. If you already have the `.hdf5` files from another machine, copying them into `runs/datasets/core/` is simpler.
+
 Examples:
 
 - `runs/datasets/core/coffee_d1.hdf5`
@@ -151,11 +163,13 @@ for spec in configs/mimicgen_tasks/*.yaml; do
 done
 ```
 
+This `prepare` step is what re-generates the official DPPO-derived config files under `dppo/cfg/mimicgen/generated/`. On a fresh machine, do not skip it even if the task specs already exist.
+
 This bootstrap does three things:
 
 - install the shared Python environment
 - create any missing central task specs with the current defaults
-- regenerate the derived DPPO artifacts and generated configs for every task whose dataset file is present locally
+- regenerate the derived DPPO artifacts and generated config files for every task whose dataset file is present locally
 
 ### New Run Behavior
 
@@ -219,6 +233,13 @@ Sweep saved BC checkpoints:
 ```bash
 cd /home/nelly/projects/rl-mimicgen
 .venv/bin/python scripts/run_official_dppo_mimicgen.py sweep --task stack_d0
+```
+
+If you want one thin wrapper that runs `prepare -> pretrain -> sweep -> eval-bc -> finetune` using the best swept BC checkpoint:
+
+```bash
+cd /home/nelly/projects/rl-mimicgen
+bash scripts/run_dppo_bc_to_rl.sh --task stack_d0
 ```
 
 If you want to pin a specific BC checkpoint for eval or finetune:
