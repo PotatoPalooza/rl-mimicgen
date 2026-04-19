@@ -21,4 +21,4 @@ sources:
 
   - name: dppo
     repo: https://github.com/PotatoPalooza/dppo.git
-    rev: main
+    rev: eb567a6c4049094f0977de41e8ce848867e6e5c1
