@@ -101,6 +101,93 @@ For diffusion runs, generated configs set `algo_name=diffusion_policy`, `train.s
 and min-max action normalization so actions are scaled into the range expected by robomimic's
 diffusion policy implementation.
 
+## DPPO
+
+The official low-dim DPPO workflow now runs through the task-spec launcher:
+
+- task specs live under `configs/mimicgen_tasks/`
+- the launcher is `scripts/run_official_dppo_mimicgen.py`
+- official `dppo/` remains the training runtime
+
+Fresh machine bootstrap:
+
+```bash
+cd /path/to/rl-mimicgen
+UV_CACHE_DIR=/path/to/rl-mimicgen/.uv-cache uv sync --locked
+
+.venv/bin/python scripts/prime_mimicgen_task_specs.py --dataset-type core
+
+for spec in configs/mimicgen_tasks/*.yaml; do
+  .venv/bin/python scripts/run_official_dppo_mimicgen.py prepare --task "$spec"
+done
+```
+
+That will:
+
+- install the shared Python environment
+- create any missing central task specs with the current defaults
+- regenerate the derived DPPO artifacts and generated configs for every task spec whose dataset file exists locally
+
+For `stack_d0`, the full pipeline is:
+
+Prepare:
+
+```bash
+cd /home/nelly/projects/rl-mimicgen
+.venv/bin/python scripts/run_official_dppo_mimicgen.py prepare --task stack_d0
+```
+
+Pretrain BC:
+
+```bash
+cd /home/nelly/projects/rl-mimicgen
+.venv/bin/python scripts/run_official_dppo_mimicgen.py pretrain --task stack_d0
+```
+
+BC eval on the latest checkpoint:
+
+```bash
+cd /home/nelly/projects/rl-mimicgen
+.venv/bin/python scripts/run_official_dppo_mimicgen.py eval-bc --task stack_d0
+```
+
+RL-init-aligned eval on the latest checkpoint:
+
+```bash
+cd /home/nelly/projects/rl-mimicgen
+.venv/bin/python scripts/run_official_dppo_mimicgen.py eval-rl-init --task stack_d0
+```
+
+Fine-tune with DPPO from the latest BC checkpoint:
+
+```bash
+cd /home/nelly/projects/rl-mimicgen
+.venv/bin/python scripts/run_official_dppo_mimicgen.py finetune --task stack_d0
+```
+
+Sweep saved BC checkpoints:
+
+```bash
+cd /home/nelly/projects/rl-mimicgen
+.venv/bin/python scripts/run_official_dppo_mimicgen.py sweep --task stack_d0
+```
+
+If you want to pin a specific BC checkpoint for eval or finetune:
+
+```bash
+cd /home/nelly/projects/rl-mimicgen
+.venv/bin/python scripts/run_official_dppo_mimicgen.py finetune \
+  --task stack_d0 \
+  --checkpoint /ABS/PATH/TO/state_1500.pt
+```
+
+Note:
+
+- `stack_d0` is configured centrally in `configs/mimicgen_tasks/stack_d0.yaml`
+- the launcher snapshots the resolved run config into each run directory
+- `prepare --task stack_d0` requires `runs/datasets/core/stack_d0.hdf5` to exist locally
+- the full workflow doc is in `docs/official_dppo_mimicgen_workflow.md`
+
 ## Analyze Logs
 
 Export plots, tables, and flat CSVs from one run, several runs, or an entire logs directory:
