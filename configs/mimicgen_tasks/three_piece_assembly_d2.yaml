@@ -1,0 +1,46 @@
+dataset_id: three_piece_assembly_d2
+
+dataset:
+  path: runs/datasets/core/three_piece_assembly_d2.hdf5
+
+materialize:
+  output_root: runs/official_dppo_mimicgen
+  val_split: 0.0
+  split_seed: 0
+
+logging:
+  root: logs/official_dppo/mimicgen
+
+runtime:
+  mujoco_gl: glx
+  video_mujoco_gl: osmesa
+
+wandb:
+  entity: null
+
+pretrain:
+  config: {}
+
+finetune:
+  config: {}
+
+eval_bc:
+  config:
+    env:
+      n_envs: 8
+
+eval_rl_init:
+  config:
+    env:
+      n_envs: 8
+
+sweep:
+  eval_mode: bc
+  device: cpu
+  n_envs: 8
+  n_steps: 500
+  max_episode_steps: 500
+  every_n: 1
+  video_checkpoints: none
+  render_num: 1
+  skip_existing: true
