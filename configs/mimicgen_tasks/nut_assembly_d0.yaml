@@ -1,4 +1,5 @@
 dataset_id: nut_assembly_d0
+seed: 42
 
 dataset:
   path: runs/datasets/core/nut_assembly_d0.hdf5

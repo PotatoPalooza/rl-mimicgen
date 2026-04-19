@@ -1,4 +1,5 @@
 dataset_id: threading_d0
+seed: 42
 
 dataset:
   path: runs/datasets/core/threading_d0.hdf5

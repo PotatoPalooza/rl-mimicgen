@@ -1,4 +1,5 @@
 dataset_id: square_d0
+seed: 42
 
 dataset:
   path: runs/datasets/core/square_d0.hdf5

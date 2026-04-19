@@ -1,0 +1,124 @@
+dataset_id: square_d1_fast
+seed: 42
+
+dataset:
+  path: runs/datasets/core/square_d1.hdf5
+
+materialize:
+  output_root: runs/official_dppo_mimicgen
+  val_split: 0.0
+  split_seed: 0
+
+logging:
+  root: logs/official_dppo/mimicgen
+
+runtime:
+  mujoco_gl: glx
+  video_mujoco_gl: osmesa
+
+wandb:
+  entity: null
+
+# Fast-path config for the first low-compute transfer attempt on a non-saturated
+# MimicGen task:
+# - keep the square family, which is materially cheaper than coffee in this repo
+# - use square_d1 instead of square_d0, because square_d0 is already effectively solved
+# - cut denoising, model width, PPO rollout size, and total RL iterations together
+# - keep enough checkpoint granularity to stop early if success saturates
+pretrain:
+  config:
+    denoising_steps: 10
+    horizon_steps: 4
+    cond_steps: 1
+    train:
+      n_epochs: 800
+      batch_size: 2048
+      learning_rate: 0.0002
+      val_freq: 25
+      save_model_freq: 25
+      lr_scheduler:
+        first_cycle_steps: 800
+        warmup_steps: 50
+        min_lr: 0.00002
+    model:
+      network:
+        time_dim: 16
+        mlp_dims: [512, 512, 512]
+        cond_mlp_dims: null
+        residual_style: true
+
+finetune:
+  config:
+    denoising_steps: 10
+    ft_denoising_steps: 5
+    horizon_steps: 4
+    act_steps: 4
+    env:
+      n_envs: 20
+    train:
+      n_train_itr: 101
+      n_steps: 100
+      actor_lr: 0.00005
+      critic_lr: 0.0005
+      batch_size: 2000
+      logprob_batch_size: 10000
+      update_epochs: 4
+      save_model_freq: 25
+      val_freq: 10
+      actor_lr_scheduler:
+        first_cycle_steps: 101
+        warmup_steps: 5
+        min_lr: 0.00005
+      critic_lr_scheduler:
+        first_cycle_steps: 101
+        warmup_steps: 5
+        min_lr: 0.0005
+    model:
+      actor:
+        time_dim: 16
+        mlp_dims: [512, 512, 512]
+        cond_mlp_dims: null
+        residual_style: true
+
+eval_bc:
+  config:
+    denoising_steps: 10
+    horizon_steps: 4
+    act_steps: 4
+    n_episodes: 16
+    env:
+      n_envs: 10
+    model:
+      network:
+        time_dim: 16
+        mlp_dims: [512, 512, 512]
+        cond_mlp_dims: null
+        residual_style: true
+
+eval_rl_init:
+  config:
+    denoising_steps: 10
+    ft_denoising_steps: 5
+    horizon_steps: 4
+    act_steps: 4
+    n_episodes: 16
+    env:
+      n_envs: 10
+    model:
+      actor:
+        time_dim: 16
+        mlp_dims: [512, 512, 512]
+        cond_mlp_dims: null
+        residual_style: true
+
+sweep:
+  eval_mode: bc
+  device: cpu
+  n_envs: 10
+  n_episodes: 16
+  n_steps: 120
+  max_episode_steps: 400
+  every_n: 1
+  video_checkpoints: none
+  render_num: 1
+  skip_existing: true

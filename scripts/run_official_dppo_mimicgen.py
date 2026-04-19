@@ -222,6 +222,23 @@ def _merge_stage_config(base_config_path: Path, task_spec: DictConfig, stage: st
     return cfg
 
 
+def _seed_override_from_args_or_task_spec(
+    args: argparse.Namespace,
+    task_spec: DictConfig,
+    *,
+    config_seed: int,
+    sweep_cfg: DictConfig | None = None,
+) -> int:
+    arg_seed = getattr(args, "seed", None)
+    if arg_seed is not None:
+        return int(arg_seed)
+    if sweep_cfg is not None and sweep_cfg.get("seed", None) is not None:
+        return int(sweep_cfg.seed)
+    if task_spec.get("seed", None) is not None:
+        return int(task_spec.seed)
+    return int(config_seed)
+
+
 def _snapshot_run_config(
     *,
     cfg: DictConfig,
@@ -338,6 +355,24 @@ def _prepare_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional completed-episode target override for this sweep. Defaults to the task spec eval/sweep setting.",
     )
+    sweep.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Optional eval seed override for this sweep. Defaults to sweep.seed, then task seed, then the generated config seed.",
+    )
+    sweep.add_argument(
+        "--start-index",
+        type=int,
+        default=None,
+        help="Optional minimum checkpoint index. Defaults to the task spec sweep.start_index if set.",
+    )
+    sweep.add_argument(
+        "--end-index",
+        type=int,
+        default=None,
+        help="Optional maximum checkpoint index. Defaults to the task spec sweep.end_index if set.",
+    )
 
     return parser
 
@@ -393,6 +428,13 @@ def _run_sweep(args: argparse.Namespace) -> None:
     sweep_stage_spec = _stage_spec(sweep_stage)
     generated_config_path = materialized["configs"][sweep_stage_spec.config_filename]
     cfg = _merge_stage_config(generated_config_path, task_spec, eval_stage, [])
+    sweep_seed = _seed_override_from_args_or_task_spec(
+        args,
+        task_spec,
+        config_seed=int(cfg.seed),
+        sweep_cfg=sweep_cfg,
+    )
+    cfg.seed = sweep_seed
 
     if args.checkpoint_dir is not None:
         checkpoint_dir = _resolve_repo_path(args.checkpoint_dir)
@@ -418,6 +460,7 @@ def _run_sweep(args: argparse.Namespace) -> None:
         "run_name": run_name,
         "created_at": created_at,
         "eval_mode": eval_mode,
+        "seed": sweep_seed,
         "task_spec_path": task_spec_path.as_posix(),
         "task_spec_snapshot_path": (run_dir / "task_spec_snapshot.yaml").as_posix(),
         "generated_config_path": generated_config_path.as_posix(),
@@ -443,6 +486,8 @@ def _run_sweep(args: argparse.Namespace) -> None:
         run_dir.as_posix(),
         "--device",
         str(sweep_cfg.get("device", "cpu")),
+        "--seed",
+        str(sweep_seed),
         "--n-envs",
         str(sweep_cfg.get("n_envs", 8)),
         "--n-episodes",
@@ -458,6 +503,12 @@ def _run_sweep(args: argparse.Namespace) -> None:
         "--render-num",
         str(sweep_cfg.get("render_num", 1)),
     ]
+    start_index = args.start_index if args.start_index is not None else sweep_cfg.get("start_index", None)
+    end_index = args.end_index if args.end_index is not None else sweep_cfg.get("end_index", None)
+    if start_index is not None:
+        command.extend(["--start-index", str(start_index)])
+    if end_index is not None:
+        command.extend(["--end-index", str(end_index)])
     if sweep_cfg.get("skip_existing", True):
         command.append("--skip-existing")
     if sweep_cfg.get("copy_best_to"):
@@ -477,6 +528,7 @@ def _run_sweep(args: argparse.Namespace) -> None:
                 "dataset_id": dataset_id,
                 "stage": "sweep",
                 "eval_mode": eval_mode,
+                "seed": sweep_seed,
                 "run_dir": run_dir.as_posix(),
                 "run_manifest_path": (run_dir / "run_manifest.json").as_posix(),
                 "best_checkpoint": best_summary.get("best_checkpoint"),

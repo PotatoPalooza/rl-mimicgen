@@ -1,4 +1,5 @@
 dataset_id: pick_place_d0
+seed: 42
 
 dataset:
   path: runs/datasets/core/pick_place_d0.hdf5

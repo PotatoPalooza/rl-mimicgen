@@ -1,4 +1,5 @@
 dataset_id: three_piece_assembly_d2
+seed: 42
 
 dataset:
   path: runs/datasets/core/three_piece_assembly_d2.hdf5

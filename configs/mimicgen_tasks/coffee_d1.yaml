@@ -1,4 +1,5 @@
 dataset_id: coffee_d1
+seed: 42
 
 dataset:
   path: runs/datasets/core/coffee_d1.hdf5

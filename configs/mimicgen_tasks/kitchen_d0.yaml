@@ -1,4 +1,5 @@
 dataset_id: kitchen_d0
+seed: 42
 
 dataset:
   path: runs/datasets/core/kitchen_d0.hdf5

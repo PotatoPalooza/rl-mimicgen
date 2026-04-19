@@ -1,4 +1,5 @@
 dataset_id: stack_three_d0
+seed: 42
 
 dataset:
   path: runs/datasets/core/stack_three_d0.hdf5
