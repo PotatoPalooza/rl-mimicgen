@@ -23,14 +23,17 @@ DEFAULT_FINETUNE_ITERS = 201
 DEFAULT_FINETUNE_FT_DENOISING_STEPS = 10
 DEFAULT_FINETUNE_SAVE_FREQ = 100
 DEFAULT_EVAL_EPISODES = 20
+DEFAULT_CHECKPOINT_EVAL_N_ENVS = 256
 DEFAULT_WANDB_PROJECT_PREFIX = "dppo-mimicgen"
 
 
-def _render_wandb_block(stage: str, dataset_id: str, entity: str | None) -> str:
+def _render_wandb_block(stage: str, dataset_id: str, entity: str | None, group: str | None) -> str:
     entity_yaml = "null" if entity is None else entity
+    group_yaml = "null" if group is None else group
     return f"""wandb:
   entity: {entity_yaml}
   project: {DEFAULT_WANDB_PROJECT_PREFIX}-{dataset_id}-{stage}
+  group: {group_yaml}
   run: ${{now:%H-%M-%S}}_${{name}}"""
 
 
@@ -39,7 +42,7 @@ def _ensure_local_repo_paths() -> None:
 
     os.environ["MUJOCO_GL"] = "glx"
     for repo_name in ("mimicgen", "robomimic", "robosuite", "robosuite-task-zoo", "dppo"):
-        repo_path = REPO_ROOT / repo_name
+        repo_path = REPO_ROOT / "resources" / repo_name
         if repo_path.exists():
             repo_path_str = str(repo_path)
             if repo_path_str not in sys.path:
@@ -186,14 +189,30 @@ def _yaml_list(values: tuple[str, ...]) -> str:
     return json.dumps(list(values))
 
 
-def _render_lowdim_env_block(spec: MimicGenLowDimSpec, *, normalization_ref: str) -> str:
+def _render_lowdim_env_block(
+    spec: MimicGenLowDimSpec,
+    *,
+    normalization_ref: str,
+    include_warp_defaults: bool = False,
+) -> str:
+    warp_block = (
+        """
+  env_type: warp
+  warp:
+    graph_capture: False
+    njmax_per_env: null
+    naconmax_per_env: null
+    physics_timestep: null"""
+        if include_warp_defaults
+        else ""
+    )
     return f"""env:
   n_envs: 50
   name: ${{env_name}}
   success_info_key: success
   best_reward_threshold_for_success: 1
   max_episode_steps: {spec.horizon}
-  save_video: False
+  save_video: False{warp_block}
   wrappers:
     robomimic_lowdim:
       normalization_path: {normalization_ref}
@@ -259,10 +278,11 @@ def _render_pretrain_config(
     config_dir: Path,
     log_root: Path,
     wandb_entity: str | None,
+    wandb_group: str | None,
 ) -> str:
     train_dataset_path = (artifact_dir / "train.npz").as_posix()
     logdir = (log_root / "pretrain" / spec.dataset_id / "${name}" / "${now:%Y-%m-%d}_${now:%H-%M-%S}_${seed}").as_posix()
-    wandb_block = _render_wandb_block("pretrain", spec.dataset_id, wandb_entity)
+    wandb_block = _render_wandb_block("pretrain", spec.dataset_id, wandb_entity, wandb_group)
     return f"""defaults:
   - _self_
 hydra:
@@ -301,13 +321,15 @@ train:
     min_lr: {DEFAULT_PRETRAIN_MIN_LR}
   save_model_freq: {DEFAULT_PRETRAIN_SAVE_FREQ}
   checkpoint_eval:
-    enabled: False
-    script_path: {(REPO_ROOT / "dppo" / "script" / "eval_checkpoint_sweep.py").as_posix()}
+    enabled: True
+    async_enabled: True
+    async_queue_size: 2
+    script_path: {(REPO_ROOT / "resources" / "dppo" / "script" / "eval_checkpoint_sweep.py").as_posix()}
     config_dir: {config_dir.as_posix()}
     config_name: eval_diffusion_mlp
     output_dir: {logdir}/checkpoint_eval
     device: ${{device}}
-    n_envs: 10
+    n_envs: {DEFAULT_CHECKPOINT_EVAL_N_ENVS}
     n_steps: {spec.horizon}
     max_episode_steps: {spec.horizon}
     every_n: 1
@@ -348,12 +370,12 @@ train_dataset:
 """
 
 
-def _render_finetune_config(spec: MimicGenLowDimSpec, artifact_dir: Path, log_root: Path, wandb_entity: str | None) -> str:
+def _render_finetune_config(spec: MimicGenLowDimSpec, artifact_dir: Path, log_root: Path, wandb_entity: str | None, wandb_group: str | None) -> str:
     normalization_path = (artifact_dir / "normalization.npz").as_posix()
     env_meta_path = (artifact_dir / "env_meta.json").as_posix()
     base_policy_path = (artifact_dir / "override_base_policy_path.pt").as_posix()
     logdir = (log_root / "finetune" / spec.dataset_id / "${name}" / "${now:%Y-%m-%d}_${now:%H-%M-%S}_${seed}").as_posix()
-    wandb_block = _render_wandb_block("finetune", spec.dataset_id, wandb_entity)
+    wandb_block = _render_wandb_block("finetune", spec.dataset_id, wandb_entity, wandb_group)
     return f"""defaults:
   - _self_
 hydra:
@@ -378,7 +400,7 @@ cond_steps: 1
 horizon_steps: 4
 act_steps: 4
 
-{_render_lowdim_env_block(spec, normalization_ref='${normalization_path}')}
+{_render_lowdim_env_block(spec, normalization_ref='${normalization_path}', include_warp_defaults=True)}
 
 {wandb_block}
 
@@ -449,7 +471,7 @@ n_episodes: {DEFAULT_EVAL_EPISODES}
 n_steps: {spec.horizon}
 render_num: 0
 
-{_render_lowdim_env_block(spec, normalization_ref='${normalization_path}')}
+{_render_lowdim_env_block(spec, normalization_ref='${normalization_path}', include_warp_defaults=True)}
 
 model:
   _target_: model.diffusion.diffusion_eval.DiffusionEval
@@ -500,7 +522,7 @@ n_episodes: {DEFAULT_EVAL_EPISODES}
 n_steps: {spec.horizon}
 render_num: 0
 
-{_render_lowdim_env_block(spec, normalization_ref='${normalization_path}')}
+{_render_lowdim_env_block(spec, normalization_ref='${normalization_path}', include_warp_defaults=True)}
 
 {_render_ppo_model_block(base_policy_ref='${base_policy_path}')}
 """
@@ -513,6 +535,7 @@ def write_official_dppo_lowdim_configs(
     config_dir: str | Path,
     log_root: str | Path,
     wandb_entity: str | None = None,
+    wandb_group: str | None = None,
 ) -> dict[str, Path]:
     artifact_path = Path(artifact_dir).expanduser().resolve()
     config_path = Path(config_dir).expanduser().resolve()
@@ -526,8 +549,9 @@ def write_official_dppo_lowdim_configs(
             config_path,
             log_root_path,
             wandb_entity,
+            wandb_group,
         ),
-        "ft_ppo_diffusion_mlp.yaml": _render_finetune_config(spec, artifact_path, log_root_path, wandb_entity),
+        "ft_ppo_diffusion_mlp.yaml": _render_finetune_config(spec, artifact_path, log_root_path, wandb_entity, wandb_group),
         "eval_diffusion_mlp.yaml": _render_eval_bc_config(spec, artifact_path, log_root_path),
         "eval_bc_diffusion_mlp.yaml": _render_eval_bc_config(spec, artifact_path, log_root_path),
         "eval_rl_init_diffusion_mlp.yaml": _render_eval_rl_init_config(spec, artifact_path, log_root_path),
@@ -578,6 +602,7 @@ def materialize_mimicgen_lowdim_port(
     log_root: str | Path | None = None,
     config_root: str | Path | None = None,
     wandb_entity: str | None = None,
+    wandb_group: str | None = None,
 ) -> dict[str, Any]:
     spec = inspect_mimicgen_lowdim_dataset(
         source_hdf5,
@@ -590,7 +615,7 @@ def materialize_mimicgen_lowdim_port(
     generated_cfg_root = (
         Path(config_root).expanduser().resolve()
         if config_root is not None
-        else REPO_ROOT / "dppo" / "cfg" / "mimicgen" / "generated"
+        else REPO_ROOT / "resources" / "dppo" / "cfg" / "mimicgen" / "generated"
     )
     config_dir = generated_cfg_root / spec.dataset_id
     log_root_path = Path(log_root).expanduser().resolve() if log_root is not None else REPO_ROOT / "logs" / "official_dppo" / "mimicgen"
@@ -692,6 +717,7 @@ def materialize_mimicgen_lowdim_port(
         config_dir=config_dir,
         log_root=log_root_path,
         wandb_entity=wandb_entity,
+        wandb_group=wandb_group,
     )
     manifest_path = write_task_manifest(
         spec,

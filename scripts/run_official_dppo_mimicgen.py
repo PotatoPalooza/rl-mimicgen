@@ -19,7 +19,7 @@ from rl_mimicgen.adapters.dppo_lowdim import REPO_ROOT, materialize_mimicgen_low
 
 
 TASK_SPECS_ROOT = REPO_ROOT / "configs" / "mimicgen_tasks"
-DPPO_ROOT = REPO_ROOT / "dppo"
+DPPO_ROOT = REPO_ROOT / "resources" / "dppo"
 DEFAULT_OUTPUT_ROOT = "runs/official_dppo_mimicgen"
 DEFAULT_LOG_ROOT = "logs/official_dppo/mimicgen"
 DEFAULT_SWEEP_EVAL_MODE = "bc"
@@ -106,8 +106,72 @@ def _task_log_root(task_spec: DictConfig) -> Path:
     return _resolve_repo_path(task_spec.get("logging", {}).get("root"), DEFAULT_LOG_ROOT)
 
 
+def _ensure_dataset(task_spec: DictConfig) -> None:
+    """Download the mimicgen dataset referenced by ``task_spec`` if missing.
+
+    The task spec's ``dataset.path`` is expected to live under a dataset-type
+    directory (e.g. ``.../core/stack_d0.hdf5``). The parent directory name
+    maps to a mimicgen ``DATASET_REGISTRY`` dataset type and the filename stem
+    maps to a task; both are validated before issuing the HF download.
+    """
+    dataset_path = _resolve_repo_path(str(task_spec.dataset.path))
+    if dataset_path is None or dataset_path.exists():
+        return
+
+    dataset_type = dataset_path.parent.name
+    task_name = dataset_path.stem
+
+    from mimicgen import DATASET_REGISTRY, HF_REPO_ID
+    from mimicgen.utils import file_utils as FileUtils
+
+    if dataset_type not in DATASET_REGISTRY:
+        raise RuntimeError(
+            f"Cannot auto-download: dataset file {dataset_path} is missing and "
+            f"parent directory {dataset_type!r} is not a registered mimicgen "
+            f"dataset type. Known types: {sorted(DATASET_REGISTRY.keys())}."
+        )
+    if task_name not in DATASET_REGISTRY[dataset_type]:
+        raise RuntimeError(
+            f"Cannot auto-download: task {task_name!r} not registered under "
+            f"mimicgen dataset type {dataset_type!r}. Available: "
+            f"{sorted(DATASET_REGISTRY[dataset_type].keys())}."
+        )
+
+    url = DATASET_REGISTRY[dataset_type][task_name]["url"]
+    dataset_path.parent.mkdir(parents=True, exist_ok=True)
+    print(
+        f"[run_official_dppo_mimicgen] dataset not found at {dataset_path}; "
+        f"downloading huggingface://{HF_REPO_ID}/{url}",
+        flush=True,
+    )
+    FileUtils.download_file_from_hf(
+        repo_id=HF_REPO_ID,
+        filename=url,
+        download_dir=str(dataset_path.parent),
+        check_overwrite=False,
+    )
+    if not dataset_path.exists():
+        raise RuntimeError(
+            f"Download reported success but dataset file is still missing: {dataset_path}"
+        )
+
+
+def _default_wandb_group(dataset_id: str) -> str:
+    """Derive a default wandb group from the dataset id.
+
+    Strips the task stem so variants group together across tasks: ``stack_d0`` →
+    ``d0``, ``coffee_d1`` → ``d1``, ``mug_cleanup_o2`` → ``o2``. Falls back to
+    the full id if there's no trailing ``_d<N>`` / ``_o<N>`` suffix.
+    """
+    match = re.search(r"_([doDO]\d+)$", dataset_id)
+    return match.group(1).lower() if match else dataset_id
+
+
 def _materialize_from_task_spec(task_spec: DictConfig) -> dict[str, Any]:
+    _ensure_dataset(task_spec)
     dataset_id = _task_dataset_id(task_spec)
+    wandb_cfg = task_spec.get("wandb", {}) or {}
+    wandb_group = wandb_cfg.get("group") or _default_wandb_group(dataset_id)
     return materialize_mimicgen_lowdim_port(
         _resolve_repo_path(str(task_spec.dataset.path)),
         output_root=_resolve_repo_path(task_spec.get("materialize", {}).get("output_root"), DEFAULT_OUTPUT_ROOT),
@@ -117,8 +181,9 @@ def _materialize_from_task_spec(task_spec: DictConfig) -> dict[str, Any]:
         val_split=float(task_spec.get("materialize", {}).get("val_split", 0.0)),
         split_seed=int(task_spec.get("materialize", {}).get("split_seed", 0)),
         log_root=_task_log_root(task_spec),
-        config_root=REPO_ROOT / "dppo" / "cfg" / "mimicgen" / "generated",
-        wandb_entity=task_spec.get("wandb", {}).get("entity"),
+        config_root=REPO_ROOT / "resources" / "dppo" / "cfg" / "mimicgen" / "generated",
+        wandb_entity=wandb_cfg.get("entity"),
+        wandb_group=wandb_group,
     )
 
 
@@ -272,6 +337,17 @@ def _snapshot_run_config(
     return run_dir, config_path, manifest
 
 
+_RUNTIME_KEY_TO_ENV = {
+    "warp_ccd_iterations": "ROBOSUITE_WARP_CCD_ITERATIONS",
+    "warp_solver_iters": "ROBOSUITE_WARP_SOLVER_ITERS",
+    "warp_ls_iters": "ROBOSUITE_WARP_LS_ITERS",
+    "warp_cone": "ROBOSUITE_WARP_CONE",
+    "warp_tolerance_clamp": "ROBOSUITE_WARP_TOLERANCE_CLAMP",
+    "warp_graph": "ROBOSUITE_WARP_GRAPH",
+    "warp_graph_warmup": "ROBOSUITE_WARP_GRAPH_WARMUP",
+}
+
+
 def _subprocess_env(task_spec: DictConfig, *, for_video: bool = False, run_dir: Path | None = None) -> dict[str, str]:
     env = os.environ.copy()
     runtime_cfg = task_spec.get("runtime", {})
@@ -279,11 +355,29 @@ def _subprocess_env(task_spec: DictConfig, *, for_video: bool = False, run_dir: 
     mujoco_gl = runtime_cfg.get(backend_key) or runtime_cfg.get("mujoco_gl")
     if mujoco_gl:
         env["MUJOCO_GL"] = str(mujoco_gl)
+    for runtime_key, env_name in _RUNTIME_KEY_TO_ENV.items():
+        value = runtime_cfg.get(runtime_key)
+        if value is not None:
+            env[env_name] = str(value)
     if run_dir is not None:
         wandb_dir = run_dir / "wandb"
         wandb_dir.mkdir(parents=True, exist_ok=True)
         env["WANDB_DIR"] = wandb_dir.as_posix()
+    # Plumb wandb group through env (upstream DPPO's wandb.init does not pass
+    # group=; wandb SDK picks up WANDB_RUN_GROUP from the environment). Respect
+    # a shell-level override if set; otherwise derive from the task spec.
+    if not env.get("WANDB_RUN_GROUP"):
+        wandb_cfg = task_spec.get("wandb", {}) or {}
+        group = wandb_cfg.get("group") or _default_wandb_group(_task_dataset_id(task_spec))
+        if group:
+            env["WANDB_RUN_GROUP"] = str(group)
     return env
+
+
+_WARP_NOISE_PATTERNS = (
+    "Warning: opt.ccd_iterations",
+    "Warning: EPA horizon",
+)
 
 
 def _run_dppo_with_snapshot(task_spec: DictConfig, run_dir: Path, config_path: Path) -> None:
@@ -293,7 +387,29 @@ def _run_dppo_with_snapshot(task_spec: DictConfig, run_dir: Path, config_path: P
         f"--config-dir={run_dir.as_posix()}",
         "--config-name=run_config",
     ]
-    subprocess.run(command, cwd=DPPO_ROOT, check=True, env=_subprocess_env(task_spec, run_dir=run_dir))
+    # Merge stderr into stdout so we can line-filter warp's device-printf
+    # warnings (emitted via wp.printf from CUDA kernels, which cannot be
+    # disabled at the warp level) without dropping legit stderr.
+    proc = subprocess.Popen(
+        command,
+        cwd=DPPO_ROOT,
+        env=_subprocess_env(task_spec, run_dir=run_dir),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        bufsize=1,
+        text=True,
+    )
+    assert proc.stdout is not None
+    try:
+        for line in proc.stdout:
+            if any(pat in line for pat in _WARP_NOISE_PATTERNS):
+                continue
+            sys.stdout.write(line)
+            sys.stdout.flush()
+    finally:
+        returncode = proc.wait()
+    if returncode != 0:
+        raise subprocess.CalledProcessError(returncode, command)
 
 
 def _prepare_parser() -> argparse.ArgumentParser:

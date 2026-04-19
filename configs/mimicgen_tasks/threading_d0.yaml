@@ -12,7 +12,7 @@ logging:
   root: logs/official_dppo/mimicgen
 
 runtime:
-  mujoco_gl: glx
+  mujoco_gl: egl
   video_mujoco_gl: osmesa
 
 wandb:
@@ -22,7 +22,20 @@ pretrain:
   config: {}
 
 finetune:
-  config: {}
+  config:
+    env:
+      env_type: warp
+      n_envs: 1024
+      warp:
+        graph_capture: true
+        njmax_per_env: null
+        naconmax_per_env: null
+        physics_timestep: null
+    train:
+      # logprob_batch_size must be divisible by n_envs. Default upstream is
+      # 10000, which is not a multiple of 1024. 10240 keeps memory footprint
+      # comparable while staying divisible.
+      logprob_batch_size: 10240
 
 eval_bc:
   config:

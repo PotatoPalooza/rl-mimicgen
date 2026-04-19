@@ -12,8 +12,14 @@ logging:
   root: logs/official_dppo/mimicgen
 
 runtime:
-  mujoco_gl: glx
+  mujoco_gl: egl
   video_mujoco_gl: osmesa
+  # Leave warp EPA iteration cap at the default (200). The device-printf
+  # warning "opt.ccd_iterations needs to be increased" that Coffee's mesh
+  # geometry triggers is filtered at the subprocess level (see
+  # run_official_dppo_mimicgen._WARP_NOISE_PATTERNS). Uncomment to trade
+  # ~2x step time for proper EPA convergence.
+  # warp_ccd_iterations: 400
 
 wandb:
   entity: null
@@ -22,7 +28,30 @@ pretrain:
   config: {}
 
 finetune:
-  config: {}
+  config:
+    env:
+      env_type: warp
+      n_envs: 1024
+      save_video: true
+      warp:
+        graph_capture: true
+        njmax_per_env: null
+        naconmax_per_env: null
+        physics_timestep: null
+    train:
+      # Bumped 5x from upstream defaults (10000/10240). VRAM at the upstream
+      # settings sits at ~21% during rollout and ~35-41% during the PPO
+      # update — plenty of headroom on warp n_envs=1024. At batch_size=50000
+      # the update loop runs ~82 batches/epoch × 5 = ~410 batches instead of
+      # ~2050, cutting per-batch Python/launch overhead proportionally.
+      # logprob_batch_size must be divisible by n_envs; 51200/1024 = 50.
+      batch_size: 50000
+      logprob_batch_size: 51200
+      render:
+        # Record env 0 every 25 iters. CPU-MjData fast path is ~0.4ms/frame,
+        # so this is effectively free on training throughput.
+        num: 1
+        freq: 25
 
 eval_bc:
   config:
