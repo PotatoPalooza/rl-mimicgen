@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import runpy
 import sys
 from pathlib import Path
@@ -14,6 +15,7 @@ import mimicgen  # noqa: F401
 
 
 def main() -> int:
+    os.environ.setdefault("MUJOCO_GL", "glx")
     train_script = WORKSPACE_DIR / "resources" / "robomimic" / "robomimic" / "scripts" / "train.py"
     runpy.run_path(str(train_script), run_name="__main__")
     return 0

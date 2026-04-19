@@ -52,6 +52,7 @@ class RobomimicVecEnv(VecEnv):
         video_height: int = 256,
         video_fps: int = 20,
         video_camera: str | None = None,
+        flatten_obs: bool = True,
     ):
         """
         Args:
@@ -80,10 +81,17 @@ class RobomimicVecEnv(VecEnv):
                 working directory if ``video_trigger`` is provided without one.
             video_width, video_height, video_fps, video_camera: mp4 framing options.
                 ``video_camera=None`` uses the env's first configured camera.
+            flatten_obs: If True (default, RSL-RL mode), observations are
+                concatenated into a single ``(num_envs, obs_dim)`` tensor under
+                the ``"policy"`` key. If False (DPPO mode), observations are
+                exposed per-key as a TensorDict of ``(num_envs, *)`` tensors so
+                downstream code can apply per-key normalization before
+                flattening itself.
         """
         self.env = env
         self.clip_actions = clip_actions
         self.terminate_on_success = terminate_on_success
+        self.flatten_obs = flatten_obs
 
         # --- VecEnv required attributes ---
         self.num_envs: int = env.env.num_envs
@@ -103,6 +111,7 @@ class RobomimicVecEnv(VecEnv):
             clip_actions=clip_actions,
             terminate_on_success=terminate_on_success,
             obs_keys=list(obs_keys) if obs_keys is not None else None,
+            flatten_obs=flatten_obs,
         )
 
         # --- Internal state ---
@@ -120,6 +129,16 @@ class RobomimicVecEnv(VecEnv):
         # ``_check_early_termination`` (e.g. "fell_off_coffee_pod"). Counts
         # may overlap across causes when multiple causes fire on the same env.
         self._term_cause_counts: dict[str, int] = {}
+        # Every cause name ever returned by ``_check_early_termination`` in
+        # this process. Used at log-flush time so buckets that didn't fire
+        # in the current window still emit 0 rather than silently dropping
+        # out of the dashboard.
+        self._early_term_causes_seen: set[str] = set()
+
+        # Most recent difficulty applied via set_difficulty(). None means no
+        # curriculum hook is active and the env's static difficulty (kwarg) is
+        # in effect — we skip logging a scalar in that case.
+        self._current_difficulty: float | None = None
 
         # Per-episode subtask tracking ("ever achieved during this episode").
         # Populated lazily on the first step where the underlying env exposes
@@ -309,8 +328,16 @@ class RobomimicVecEnv(VecEnv):
             extras["log"]["Episode_Termination/success"] = self._term_success_count / n_done
             extras["log"]["Episode_Termination/time_out"] = self._term_timeout_count / n_done
             extras["log"]["Episode_Termination/nan_term"] = self._term_nan_count / n_done
-            for cause, n in self._term_cause_counts.items():
+            extras["log"]["Episode_Termination/early_term"] = self._term_early_count / n_done
+            # Emit every cause ever seen this process, even if it had 0
+            # firings in the current window — keeps dashboards stable
+            # instead of dropping series in and out.
+            for cause in sorted(self._early_term_causes_seen):
+                n = self._term_cause_counts.get(cause, 0)
                 extras["log"][f"Episode_Termination/{cause}"] = n / n_done
+
+            if self._current_difficulty is not None:
+                extras["log"]["Curriculum/difficulty"] = self._current_difficulty
 
             self._success_count = 0
             self._term_success_count = 0
@@ -324,9 +351,9 @@ class RobomimicVecEnv(VecEnv):
         # if the reset path left residual NaN (rare, but warp's global forward()
         # after per-env restore can occasionally propagate). Silent — the
         # divergence path already logged the event.
-        flat = self._cached_obs_td["policy"]
-        if torch.isnan(flat).any():
-            self._cached_obs_td["policy"] = torch.nan_to_num(flat, nan=0.0, posinf=0.0, neginf=0.0)
+        for key, tensor in list(self._cached_obs_td.items()):
+            if torch.is_floating_point(tensor) and torch.isnan(tensor).any():
+                self._cached_obs_td[key] = torch.nan_to_num(tensor, nan=0.0, posinf=0.0, neginf=0.0)
         if torch.isnan(reward).any():
             reward = torch.nan_to_num(reward, nan=0.0, posinf=0.0, neginf=0.0)
         return self._cached_obs_td, reward, dones, extras
@@ -341,6 +368,19 @@ class RobomimicVecEnv(VecEnv):
             torch.manual_seed(seed)
             np.random.seed(seed)
         return seed
+
+    def set_difficulty(self, difficulty: float) -> float:
+        """Push a new curriculum difficulty into the underlying env.
+
+        Returns the clipped value actually applied (so callers can log it).
+        No-op on envs that don't implement ``set_difficulty``.
+        """
+        fn = getattr(self.env.env, "set_difficulty", None)
+        d = float(np.clip(difficulty, 0.0, 1.0))
+        if callable(fn):
+            fn(d)
+        self._current_difficulty = d
+        return d
 
     def close(self):
         pass
@@ -596,6 +636,7 @@ class RobomimicVecEnv(VecEnv):
                 )
             else:
                 out[cause] = torch.as_tensor(arr.astype(bool), device=self.device)
+        self._early_term_causes_seen.update(out.keys())
         return out
 
     def _reset_envs(self, env_indices, obs_dict: dict | None = None) -> dict:
@@ -737,9 +778,16 @@ class RobomimicVecEnv(VecEnv):
                 qpos_t[row_idxs.unsqueeze(1), entry["grip_idxs"].unsqueeze(0)] = entry["grip_init"]
 
     def _obs_dict_to_tensordict(self, obs_dict: dict) -> TensorDict:
-        """Flatten all observation keys into a single ``(num_envs, obs_dim)`` tensor
-        stored under the ``"policy"`` key of a TensorDict."""
-        tensors = []
+        """Materialise observations as a TensorDict on ``self.device``.
+
+        When ``flatten_obs`` is True (RSL-RL mode), all keys in
+        ``self._obs_keys`` are concatenated along the feature dim and stored
+        under the ``"policy"`` key. When False (DPPO mode), each observation
+        key becomes its own entry in the TensorDict, preserving original
+        per-key shapes — downstream consumers handle flattening themselves so
+        per-key normalization stays meaningful.
+        """
+        per_key: dict[str, torch.Tensor] = {}
         for k in self._obs_keys:
             v = obs_dict[k]
             if not isinstance(v, torch.Tensor):
@@ -747,6 +795,8 @@ class RobomimicVecEnv(VecEnv):
             v = v.float().to(self.device)
             if v.dim() == 1:
                 v = v.unsqueeze(-1)
-            tensors.append(v)
-        flat = torch.cat(tensors, dim=-1)  # (num_envs, obs_dim)
-        return TensorDict({"policy": flat}, batch_size=[self.num_envs], device=self.device)
+            per_key[k] = v
+        if self.flatten_obs:
+            flat = torch.cat([per_key[k] for k in self._obs_keys], dim=-1)
+            return TensorDict({"policy": flat}, batch_size=[self.num_envs], device=self.device)
+        return TensorDict(per_key, batch_size=[self.num_envs], device=self.device)

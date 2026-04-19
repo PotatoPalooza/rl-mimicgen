@@ -1,0 +1,49 @@
+dataset_id: stack_d0
+
+dataset:
+  path: runs/datasets/core/stack_d0.hdf5
+
+materialize:
+  output_root: runs/official_dppo_mimicgen
+  val_split: 0.0
+  split_seed: 0
+
+logging:
+  root: logs/official_dppo/mimicgen
+
+runtime:
+  mujoco_gl: glx
+  video_mujoco_gl: osmesa
+
+wandb:
+  entity: null
+
+pretrain:
+  config: {}
+
+finetune:
+  config: {}
+
+eval_bc:
+  config:
+    n_episodes: 20
+    env:
+      n_envs: 20
+
+eval_rl_init:
+  config:
+    n_episodes: 20
+    env:
+      n_envs: 20
+
+sweep:
+  eval_mode: bc
+  device: cpu
+  n_envs: 20
+  n_episodes: 20
+  n_steps: 400
+  max_episode_steps: 400
+  every_n: 1
+  video_checkpoints: none
+  render_num: 1
+  skip_existing: true

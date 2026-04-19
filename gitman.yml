@@ -12,10 +12,13 @@ sources:
     rev: 74eab7f88214c21ca1ae8617c2b2f8d19718a9ed
 
   - name: robomimic
-    repo: https://github.com/Creampelt/robomimic
-    rev: d0b37cf214bd24fb590d182edb6384333f67b661
+    repo: https://github.com/ARISE-Initiative/robomimic
+    rev: ae5799f0fae05c4559ee1f9645b0f77eb5251929
 
   - name: mimicgen
     repo: https://github.com/PotatoPalooza/mimicgen
     rev: main
 
+  - name: dppo
+    repo: https://github.com/PotatoPalooza/dppo.git
+    rev: 72c5db5a31ca821971fb827ef312383ade44774f

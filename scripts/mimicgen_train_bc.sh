@@ -4,15 +4,16 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 Usage:
-  scripts/run_paper_bc_one_task_parallel.sh --task TASK [options]
+  scripts/mimicgen_train_bc.sh --task TASK [options]
 
-Runs one paper BC task as independent variant x modality jobs using
+Runs one MimicGen task as independent variant x modality jobs using
 `rl_mimicgen.mimicgen.paper_bc_one_task`.
 
 Options:
   --task TASK                  Required task name.
   --variant NAME              Limit to a specific variant. Repeatable.
   --modality NAME             Limit to a specific modality. Repeatable. Default: low_dim,image
+  --algo NAME                 Training algorithm. Repeatable. Default: bc. Supported: bc,diffusion_policy
   --max-parallel N            Maximum concurrent jobs. Default: 2
   --run-root-base PATH        Base directory for per-job run roots.
   --data-dir PATH             Shared dataset directory.
@@ -22,8 +23,8 @@ Options:
   --help                      Show this help.
 
 Examples:
-  scripts/run_paper_bc_one_task_parallel.sh --task square
-  scripts/run_paper_bc_one_task_parallel.sh --task square --variant D0 --variant D1 --max-parallel 2
+  scripts/mimicgen_train_bc.sh --task square
+  scripts/mimicgen_train_bc.sh --task square --algo diffusion_policy --variant D0 --modality low_dim
 EOF
 }
 
@@ -83,6 +84,7 @@ DATA_DIR=""
 RUNNER_FLAGS=()
 REQUESTED_VARIANTS=()
 REQUESTED_MODALITIES=()
+REQUESTED_ALGOS=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -96,6 +98,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --modality)
       REQUESTED_MODALITIES+=("$2")
+      shift 2
+      ;;
+    --algo)
+      REQUESTED_ALGOS+=("$2")
       shift 2
       ;;
     --max-parallel)
@@ -144,10 +150,20 @@ fi
 if [[ ${#REQUESTED_MODALITIES[@]} -eq 0 ]]; then
   REQUESTED_MODALITIES=("low_dim" "image")
 fi
+if [[ ${#REQUESTED_ALGOS[@]} -eq 0 ]]; then
+  REQUESTED_ALGOS=("bc")
+fi
 
 for modality in "${REQUESTED_MODALITIES[@]}"; do
   if [[ "$modality" != "low_dim" && "$modality" != "image" ]]; then
     echo "Unsupported modality: $modality" >&2
+    exit 2
+  fi
+done
+
+for algo in "${REQUESTED_ALGOS[@]}"; do
+  if [[ "$algo" != "bc" && "$algo" != "diffusion_policy" ]]; then
+    echo "Unsupported algorithm: $algo" >&2
     exit 2
   fi
 done
@@ -183,6 +199,9 @@ for variant in "${REQUESTED_VARIANTS[@]}"; do
     run_root="$RUN_ROOT_BASE/${variant}_${modality}"
     log_path="$LOG_DIR/${variant}_${modality}.log"
     cmd=(python3 -m rl_mimicgen.mimicgen.paper_bc_one_task --task "$TASK" --variant "$variant" --modality "$modality" --run-root "$run_root")
+    for algo in "${REQUESTED_ALGOS[@]}"; do
+      cmd+=(--algo "$algo")
+    done
     if [[ -n "$DATA_DIR" ]]; then
       cmd+=(--data-dir "$DATA_DIR")
     fi

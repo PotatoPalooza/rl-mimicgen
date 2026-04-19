@@ -15,6 +15,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Iterable, Optional
 
+from rl_mimicgen.diffusion_runtime import apply_runtime_profile_to_diffusion_payload, available_runtime_profiles
 from rl_mimicgen.mimicgen.runtime_checks import check_torch_cuda_compatibility
 
 WORKSPACE_DIR = Path(__file__).resolve().parents[2]
@@ -104,6 +105,7 @@ class Config:
     training_data: str
     include_robot_transfer: bool
     tasks: Optional[list[str]]
+    diffusion_runtime_profile: str | None
     dry_run: bool
     warp: bool
     logger: str
@@ -229,13 +231,14 @@ class Runner:
         self.logger.info("Data dir: %s", self.cfg.data_dir)
         self.logger.info("Tasks: %s", ",".join(self.cfg.tasks) if self.cfg.tasks else "all")
         self.logger.info(
-            "NUM_TRAJ=%s GUARANTEE=%s RUN_GENERATION=%s RUN_TRAINING=%s TRAINING_DATA=%s ROBOT_TRANSFER=%s DRY_RUN=%s WARP=%s LOGGER=%s",
+            "NUM_TRAJ=%s GUARANTEE=%s RUN_GENERATION=%s RUN_TRAINING=%s TRAINING_DATA=%s ROBOT_TRANSFER=%s DIFFUSION_RUNTIME_PROFILE=%s DRY_RUN=%s WARP=%s LOGGER=%s",
             self.cfg.num_traj,
             int(self.cfg.guarantee),
             int(self.cfg.run_generation),
             int(self.cfg.run_training),
             self.cfg.training_data,
             int(self.cfg.include_robot_transfer),
+            self.cfg.diffusion_runtime_profile or "none",
             int(self.cfg.dry_run),
             int(self.cfg.warp),
             self.cfg.logger,
@@ -569,6 +572,7 @@ class Runner:
             output_dir=str(self.cfg.core_train_output_dir),
         )
         _, lines = config_generator_to_script_lines(generators, config_dir=str(self.cfg.core_train_config_dir))
+        self.apply_diffusion_runtime_profile_to_command_configs(lines)
         lines = self.filter_command_lines(self.training_command_lines(lines), "core training")
         config_paths = self._config_paths_from_lines(lines)
         self.rewrite_training_output_dirs(config_paths)
@@ -603,6 +607,7 @@ class Runner:
             shlex.join([sys.executable, "-m", "rl_mimicgen.mimicgen.train_robomimic", "--config", config_path])
             for config_path in config_paths
         ]
+        self.apply_diffusion_runtime_profile_to_command_configs(lines)
         self.write_command_file(self.cfg.core_train_commands, lines, "core training")
 
     def generate_robot_training_commands(self) -> None:
@@ -614,6 +619,7 @@ class Runner:
             output_dir=str(self.cfg.robot_train_output_dir),
         )
         _, lines = config_generator_to_script_lines(generators, config_dir=str(self.cfg.robot_train_config_dir))
+        self.apply_diffusion_runtime_profile_to_command_configs(lines)
         lines = self.filter_command_lines(self.training_command_lines(lines), "robot training")
         config_paths = self._config_paths_from_lines(lines)
         self.rewrite_training_output_dirs(config_paths)
@@ -622,6 +628,25 @@ class Runner:
         if self.cfg.logger == "wandb":
             self.inject_wandb_into_configs(config_paths)
         self.write_command_file(self.cfg.robot_train_commands, lines, "robot training")
+
+    def apply_diffusion_runtime_profile_to_command_configs(self, lines: list[str]) -> None:
+        if not self.cfg.diffusion_runtime_profile:
+            return
+        for line in lines:
+            cmd = shlex.split(line.strip())
+            if "--config" not in cmd:
+                continue
+            config_path = Path(cmd[cmd.index("--config") + 1])
+            if not config_path.exists():
+                continue
+            payload = json.loads(config_path.read_text(encoding="utf-8"))
+            updated = apply_runtime_profile_to_diffusion_payload(payload, self.cfg.diffusion_runtime_profile)
+            config_path.write_text(json.dumps(updated, indent=4) + "\n", encoding="utf-8")
+            self.logger.info(
+                "Applied diffusion runtime profile %s to %s",
+                self.cfg.diffusion_runtime_profile,
+                config_path,
+            )
 
     def run_command_file(self, label: str, path: Path) -> None:
         if not path.exists():
@@ -705,6 +730,12 @@ def parse_args(argv: Optional[list[str]] = None) -> Config:
         default=os.environ.get("TRAINING_DATA", "generated"),
         help="Which datasets training configs should target: generated MimicGen datasets or downloaded source demonstrations.",
     )
+    parser.add_argument(
+        "--diffusion-runtime-profile",
+        choices=available_runtime_profiles(),
+        default=os.environ.get("DIFFUSION_RUNTIME_PROFILE"),
+        help="Optional shared diffusion runtime profile to apply to generated diffusion_policy training configs.",
+    )
     add_bool_arg(parser, "include-robot-transfer", env_bool("INCLUDE_ROBOT_TRANSFER", False), "Include robot-transfer generation and training stages.")
     add_bool_arg(parser, "dry-run", env_bool("DRY_RUN", False), "Log stages without executing them.")
     add_bool_arg(parser, "warp", env_bool("WARP", False), "Enable MuJoCo Warp GPU-parallel rollouts in generated training configs.")
@@ -735,6 +766,7 @@ def parse_args(argv: Optional[list[str]] = None) -> Config:
         training_data=args.training_data,
         include_robot_transfer=args.include_robot_transfer,
         tasks=tasks,
+        diffusion_runtime_profile=args.diffusion_runtime_profile,
         dry_run=args.dry_run,
         warp=args.warp,
         logger=args.logger,
