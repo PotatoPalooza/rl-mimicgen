@@ -17,7 +17,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output_dir", required=True, help="Directory for per-checkpoint metrics and best-checkpoint summary.")
     parser.add_argument("--episodes", type=int, default=5, help="Episodes per checkpoint evaluation.")
     parser.add_argument("--max_steps", type=int, default=None, help="Optional max episode length.")
-    parser.add_argument("--every_n", type=int, default=1, help="Evaluate every Nth checkpoint by checkpoint index.")
+    parser.add_argument("--every_n", type=int, default=1, help="Evaluate every Nth checkpoint in sorted checkpoint order.")
     parser.add_argument("--start_index", type=int, default=None, help="Optional minimum checkpoint index.")
     parser.add_argument("--end_index", type=int, default=None, help="Optional maximum checkpoint index.")
     parser.add_argument(
@@ -43,7 +43,7 @@ def _collect_checkpoints(
     start_index: int | None,
     end_index: int | None,
 ) -> list[tuple[int, Path]]:
-    selected: list[tuple[int, Path]] = []
+    available: list[tuple[int, Path]] = []
     for path in sorted(checkpoint_dir.glob("state_*.pt")):
         index = _checkpoint_index(path)
         if index is None:
@@ -52,10 +52,10 @@ def _collect_checkpoints(
             continue
         if end_index is not None and index > end_index:
             continue
-        if every_n > 1 and index % every_n != 0:
-            continue
-        selected.append((index, path))
-    return selected
+        available.append((index, path))
+    if every_n <= 1:
+        return available
+    return [item for ordinal, item in enumerate(available) if ordinal % every_n == 0]
 
 
 def _metric_rank(metrics: dict[str, float | str]) -> tuple[float, float, float]:
