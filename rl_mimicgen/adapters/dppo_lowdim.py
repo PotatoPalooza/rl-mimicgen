@@ -21,6 +21,7 @@ DEFAULT_PRETRAIN_VAL_FREQ = 10
 DEFAULT_PRETRAIN_SAVE_FREQ = 50
 DEFAULT_FINETUNE_ITERS = 201
 DEFAULT_FINETUNE_FT_DENOISING_STEPS = 10
+DEFAULT_FINETUNE_SAVE_FREQ = 200
 DEFAULT_WANDB_PROJECT_PREFIX = "dppo-mimicgen"
 
 
@@ -397,7 +398,7 @@ train:
     first_cycle_steps: ${{train.n_train_itr}}
     warmup_steps: 10
     min_lr: 1e-3
-  save_model_freq: 100
+  save_model_freq: {DEFAULT_FINETUNE_SAVE_FREQ}
   val_freq: 10
   render:
     freq: 1
