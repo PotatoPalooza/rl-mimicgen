@@ -15,15 +15,18 @@ Recommended conventions:
 
 ## Progress Snapshot
 
-- Done: `square_d0`
-- In progress (`rl`): `coffee_d1`, `coffee_d2`, `square_d1`, `square_d2`
-- Todo: `coffee_d0`, `stack_d0`, `stack_d1`, `threading_d0`, `threading_d1`, `threading_d2`, `hammer_cleanup_d0`, `hammer_cleanup_d1`, `three_piece_assembly_d0`, `three_piece_assembly_d1`, `three_piece_assembly_d2`
+- Updated: `2026-04-19 15:21 PDT`
+- Done: `mug_cleanup_d0`, `square_d0`, `three_piece_assembly_d0`
+- In progress (`rl`): `coffee_d1`, `coffee_d2`, `mug_cleanup_d1`, `square_d1`, `square_d2`, `three_piece_assembly_d1`
+- Todo: `coffee_d0`, `stack_d0`, `stack_d1`, `threading_d0`, `threading_d1`, `threading_d2`, `hammer_cleanup_d0`, `hammer_cleanup_d1`, `three_piece_assembly_d2`
 
 | Task | Status | BC checkpoint | BC eval episodes | BC success | RL init success | RL best success | BC source | RL source | Notes |
 | --- | --- | --- | ---: | ---: | ---: | ---: | --- | --- | --- |
 | coffee_d0 | todo |  |  |  |  |  |  |  |  |
 | coffee_d1 | rl | state_1500.pt | 1 | 1.0000 | 0.8500 | 1.0000 | sweep/coffee_d1/coffee_d1_sweep_bc/sweep_bc_coffee_d1_20260419_135337_s42_e26ce8 | finetune/coffee_d1/coffee_d1_ft_diffusion_mlp_ta4_td20_tdf10/finetune_coffee_d1_20260418_232657_s42_b6414c | Sweep moved to a 1-episode screening after previous longer sweep; BC eval on this checkpoint is 0.8150 over 200 episodes. |
 | coffee_d2 | rl | state_800.pt | 10 | 0.7000 | 0.6050 | 0.9900 | sweep/coffee_d2/coffee_d2_sweep_bc/sweep_bc_coffee_d2_20260419_015956_s42_0de597 | finetune/coffee_d2/finetune_coffee_d2_20260419_022909_s42_92ef86 | Best swept BC checkpoint came from a 10-episode sweep; BC eval on that checkpoint is 0.6050 over 200 episodes. |
+| mug_cleanup_d0 | done | state_1000.pt | 20 | 0.9000 | 0.6850 | 1.0000 | sweep/mug_cleanup_d0/mug_cleanup_d0_sweep_bc/sweep_bc_mug_cleanup_d0_20260418_225145_s42_521468 | finetune/mug_cleanup_d0/mug_cleanup_d0_ft_diffusion_mlp_ta4_td20_tdf10/finetune_mug_cleanup_d0_20260418_233831_s42_734e8a | Finetune reached `itr=200` and completed; best eval checkpoint hit 1.0000 success. |
+| mug_cleanup_d1 | rl | state_1350.pt | 20 | 0.6000 | 0.5550 | 0.9750 | sweep/mug_cleanup_d1/mug_cleanup_d1_sweep_bc/sweep_bc_mug_cleanup_d1_20260419_041720_s42_087bc9 | finetune/mug_cleanup_d1/mug_cleanup_d1_ft_diffusion_mlp_ta4_td20_tdf10/finetune_mug_cleanup_d1_20260419_042459_s42_513e81 | Finetune in progress at `itr=157`; current best eval success is 0.9750. |
 | square_d0 | done | state_1500.pt | 32 | 0.90625 | 0.7550 | 0.9950 | sweep/square_d0/square_d0_sweep_bc/2026-04-18_19-30-16_42 | finetune/square_d0/square_d0_ft_diffusion_mlp_ta4_td20_tdf10/2026-04-18_18-57-34_42 | RL best reached 0.9950; RL init was 0.7550. |
 | square_d1 | rl | state_1250.pt | 10 | 0.6000 | 0.6300 | 0.8650 | sweep/square_d1/square_d1_sweep_bc/sweep_bc_square_d1_20260419_141411_s42_b9c5c8 | finetune/square_d1/square_d1_ft_diffusion_mlp_ta4_td20_tdf10/finetune_square_d1_20260419_145306_s42_f85ea0 | BC sweep at 10 episodes; first RL eval was 0.6300, best RL eval 0.8650. |
 | square_d2 | rl | state_1250.pt | 10 | 0.7000 | 0.3350 | 0.5200 | sweep/square_d2/square_d2_sweep_bc/sweep_bc_square_d2_20260419_141434_s42_9bcec9 | finetune/square_d2/square_d2_ft_diffusion_mlp_ta4_td20_tdf10/finetune_square_d2_20260419_145433_s42_5e6b91 | BC sweep at 10 episodes; first RL eval was 0.3350, best RL eval 0.5200. |
@@ -34,6 +37,6 @@ Recommended conventions:
 | threading_d2 | todo |  |  |  |  |  |  |  |  |
 | hammer_cleanup_d0 | todo |  |  |  |  |  |  |  |  |
 | hammer_cleanup_d1 | todo |  |  |  |  |  |  |  |  |
-| three_piece_assembly_d0 | todo |  |  |  |  |  |  |  |  |
-| three_piece_assembly_d1 | todo |  |  |  |  |  |  |  |  |
+| three_piece_assembly_d0 | done | state_1300.pt | 20 | 0.7000 | 0.6250 | 0.9750 | sweep/three_piece_assembly_d0/three_piece_assembly_d0_sweep_bc/sweep_bc_three_piece_assembly_d0_20260418_225241_s42_79c42e | finetune/three_piece_assembly_d0/three_piece_assembly_d0_ft_diffusion_mlp_ta4_td20_tdf10/finetune_three_piece_assembly_d0_20260418_233833_s42_a1010d | Finetune reached `itr=200` and completed; best eval checkpoint hit 0.9750 success. |
+| three_piece_assembly_d1 | rl | state_1450.pt | 20 | 0.3000 | 0.3750 | 0.8750 | sweep/three_piece_assembly_d1/three_piece_assembly_d1_sweep_bc/sweep_bc_three_piece_assembly_d1_20260419_043630_s42_bb82ec | finetune/three_piece_assembly_d1/three_piece_assembly_d1_ft_diffusion_mlp_ta4_td20_tdf10/finetune_three_piece_assembly_d1_20260419_044633_s42_a534ed | Finetune in progress at `itr=131`; current best eval success is 0.8750. |
 | three_piece_assembly_d2 | todo |  |  |  |  |  |  |  |  |
