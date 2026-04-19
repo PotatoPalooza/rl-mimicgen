@@ -48,18 +48,21 @@ finetune:
 
 eval_bc:
   config:
+    n_episodes: 20
     env:
-      n_envs: 8
+      n_envs: 20
 
 eval_rl_init:
   config:
+    n_episodes: 20
     env:
-      n_envs: 8
+      n_envs: 20
 
 sweep:
   eval_mode: bc
   device: cpu
-  n_envs: 8
+  n_envs: 20
+  n_episodes: 20
   n_steps: {horizon}
   max_episode_steps: {horizon}
   every_n: 1

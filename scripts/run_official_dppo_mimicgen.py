@@ -119,9 +119,21 @@ def _build_run_name(stage: str, cfg: DictConfig, dataset_id: str) -> str:
     raise ValueError(f"Unknown stage: {stage}")
 
 
+def _checkpoint_sort_key(path: Path) -> tuple[str, int]:
+    run_dir = path.parent.parent
+    run_stamp = run_dir.name
+    checkpoint_name = path.stem
+    try:
+        checkpoint_step = int(checkpoint_name.split("_")[1])
+    except (IndexError, ValueError):
+        checkpoint_step = -1
+    return run_stamp, checkpoint_step
+
+
 def _latest_checkpoint_for_task(log_root: Path, dataset_id: str) -> Path:
     checkpoint_paths = sorted(
-        log_root.glob(f"pretrain/{dataset_id}/**/checkpoint/state_*.pt")
+        log_root.glob(f"pretrain/{dataset_id}/**/checkpoint/state_*.pt"),
+        key=_checkpoint_sort_key,
     )
     if not checkpoint_paths:
         raise FileNotFoundError(f"No pretrain checkpoints found for {dataset_id} under {log_root}")
@@ -234,6 +246,18 @@ def _prepare_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional eval surface override. Defaults to the task spec sweep setting.",
     )
+    sweep.add_argument(
+        "--every-n",
+        type=int,
+        default=None,
+        help="Optional checkpoint stride override for this sweep. Defaults to the task spec sweep.every_n value.",
+    )
+    sweep.add_argument(
+        "--n-episodes",
+        type=int,
+        default=None,
+        help="Optional completed-episode target override for this sweep. Defaults to the task spec eval/sweep setting.",
+    )
 
     return parser
 
@@ -327,12 +351,14 @@ def _run_sweep(args: argparse.Namespace) -> None:
         str(sweep_cfg.get("device", "cpu")),
         "--n-envs",
         str(sweep_cfg.get("n_envs", 8)),
+        "--n-episodes",
+        str(args.n_episodes if args.n_episodes is not None else sweep_cfg.get("n_episodes", cfg.get("n_episodes", 20))),
         "--n-steps",
         str(sweep_cfg.get("n_steps", materialized["spec"].horizon)),
         "--max-episode-steps",
         str(sweep_cfg.get("max_episode_steps", materialized["spec"].horizon)),
         "--every-n",
-        str(sweep_cfg.get("every_n", 1)),
+        str(args.every_n if args.every_n is not None else sweep_cfg.get("every_n", 1)),
         "--video-checkpoints",
         str(sweep_cfg.get("video_checkpoints", "none")),
         "--render-num",

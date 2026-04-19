@@ -21,7 +21,8 @@ DEFAULT_PRETRAIN_VAL_FREQ = 10
 DEFAULT_PRETRAIN_SAVE_FREQ = 50
 DEFAULT_FINETUNE_ITERS = 201
 DEFAULT_FINETUNE_FT_DENOISING_STEPS = 10
-DEFAULT_FINETUNE_SAVE_FREQ = 200
+DEFAULT_FINETUNE_SAVE_FREQ = 100
+DEFAULT_EVAL_EPISODES = 20
 DEFAULT_WANDB_PROJECT_PREFIX = "dppo-mimicgen"
 
 
@@ -444,6 +445,7 @@ horizon_steps: 4
 act_steps: 4
 ft_denoising_steps: 0
 
+n_episodes: {DEFAULT_EVAL_EPISODES}
 n_steps: {spec.horizon}
 render_num: 0
 
@@ -494,6 +496,7 @@ cond_steps: 1
 horizon_steps: 4
 act_steps: 4
 
+n_episodes: {DEFAULT_EVAL_EPISODES}
 n_steps: {spec.horizon}
 render_num: 0
 
