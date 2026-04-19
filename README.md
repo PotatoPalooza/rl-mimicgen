@@ -109,26 +109,75 @@ The official low-dim DPPO workflow now runs through the task-spec launcher:
 - the launcher is `scripts/run_official_dppo_mimicgen.py`
 - official `dppo/` remains the training runtime
 
-Fresh machine bootstrap:
+### Fresh Machine Bootstrap
+
+On a new machine, do this in order.
 
 ```bash
 cd /path/to/rl-mimicgen
 UV_CACHE_DIR=/path/to/rl-mimicgen/.uv-cache uv sync --locked
+```
 
+Then make sure the MimicGen HDF5 files exist at the paths referenced by the task specs.
+
+Most low-dim tasks in this repo expect datasets under:
+
+- `runs/datasets/core/`
+
+If they are not already there, you will need to either:
+
+- run the dataset download / generation flow for this repo, or
+- move / copy the HDF5 files into `runs/datasets/core/` on the new machine
+
+Examples:
+
+- `runs/datasets/core/coffee_d1.hdf5`
+- `runs/datasets/core/square_d0.hdf5`
+- `runs/datasets/core/stack_d0.hdf5`
+
+Then prime any missing task specs with the current defaults:
+
+```bash
+cd /path/to/rl-mimicgen
 .venv/bin/python scripts/prime_mimicgen_task_specs.py --dataset-type core
+```
 
+Then regenerate the derived DPPO artifacts/configs for every task spec whose dataset exists locally:
+
+```bash
+cd /path/to/rl-mimicgen
 for spec in configs/mimicgen_tasks/*.yaml; do
   .venv/bin/python scripts/run_official_dppo_mimicgen.py prepare --task "$spec"
 done
 ```
 
-That will:
+This bootstrap does three things:
 
 - install the shared Python environment
 - create any missing central task specs with the current defaults
-- regenerate the derived DPPO artifacts and generated configs for every task spec whose dataset file exists locally
+- regenerate the derived DPPO artifacts and generated configs for every task whose dataset file is present locally
 
-For `stack_d0`, the full pipeline is:
+### New Run Behavior
+
+Run/state behavior:
+
+- new launcher-driven runs are append-only and get unique `run_id`s
+- each run keeps its own `run_config.yaml`, `task_spec_snapshot.yaml`, and `run_manifest.json`
+- new runs never need to overwrite or mutate old runs
+- if you want to chain from an old artifact, pass `--checkpoint` or `--run-dir` explicitly
+
+Example of launching from an older run directory:
+
+```bash
+cd /home/nelly/projects/rl-mimicgen
+.venv/bin/python scripts/run_official_dppo_mimicgen.py finetune \
+  --task coffee_d1 \
+  --run-dir /ABS/PATH/TO/OLD/SWEEP/OR/PRETRAIN/RUN
+```
+
+### Example Pipeline: `stack_d0`
+
+Once `runs/datasets/core/stack_d0.hdf5` exists locally, the full pipeline is:
 
 Prepare:
 
