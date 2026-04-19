@@ -328,7 +328,6 @@ class RobomimicVecEnv(VecEnv):
             extras["log"]["Episode_Termination/success"] = self._term_success_count / n_done
             extras["log"]["Episode_Termination/time_out"] = self._term_timeout_count / n_done
             extras["log"]["Episode_Termination/nan_term"] = self._term_nan_count / n_done
-            extras["log"]["Episode_Termination/early_term"] = self._term_early_count / n_done
             # Emit every cause ever seen this process, even if it had 0
             # firings in the current window — keeps dashboards stable
             # instead of dropping series in and out.
@@ -530,12 +529,23 @@ class RobomimicVecEnv(VecEnv):
         self._cached_obs_td = self._obs_dict_to_tensordict(obs_dict)
 
     def _find_diverged_envs(self, obs_dict: dict) -> torch.Tensor:
-        """Return a (num_envs,) bool mask of envs with NaN in any policy obs key.
+        """Return a (num_envs,) bool mask of envs with NaN state.
 
-        Only the keys in ``self._obs_keys`` are checked — these are guaranteed
-        to be per-env tensors. Other dict entries (e.g. robosuite's concatenated
-        modality groups like ``"object-state"``) are not necessarily batched.
+        For warp sims, qpos is the single source of divergence — if physics
+        NaNs out it's always in qpos first, and every observation keyed off
+        qpos inherits the NaN on the next kinematics pass. So one
+        ``isnan(qpos).any(dim=1)`` replaces ~15 per-key isnan kernels.
+
+        Falls back to the per-obs-key scan when we can't reach ``qpos``
+        (non-warp sims or before the inner env exposes it).
         """
+        try:
+            import warp as wp
+            qpos_t = wp.to_torch(self.env.env.sim._warp_data.qpos)
+            if qpos_t.shape[0] == self.num_envs:
+                return torch.isnan(qpos_t).any(dim=1)
+        except Exception:
+            pass
         mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         for k in self._obs_keys:
             v = obs_dict.get(k)

@@ -102,6 +102,12 @@ def parse_args():
     parser.add_argument("--max_iterations", type=int, default=None,
                         help="Total PPO iterations. Overrides ppo_cfg.json if set "
                              "(default there: 30000).")
+    parser.add_argument("--difficulty_horizon", type=int, default=None,
+                        help="Iterations to reach difficulty=1.0 from a start of "
+                             "0.0. Overrides ppo_cfg.json / dapg_cfg.json "
+                             "(difficulty_horizon). =0: difficulty fixed at 1.0. "
+                             "Unset/null: no curriculum (env uses env_kwargs.difficulty, "
+                             "default 0 = no randomization).")
     parser.add_argument("--num_steps_per_env", type=int, default=None,
                         help="Rollout steps per env per PPO update. Overrides the value "
                              "in ppo_cfg.json if set (default there: 24).")
@@ -169,6 +175,9 @@ def parse_args():
     parser.add_argument("--wandb_project", type=str, default=None,
                         help="W&B project name. Defaults to '{task}_{obs_type}_ppo' "
                              "derived from the BC env_meta (e.g. 'coffee_low_dim_ppo').")
+    parser.add_argument("--wandb_group", type=str, default=None,
+                        help="W&B run group. Plumbed as WANDB_RUN_GROUP env var so rsl_rl's "
+                             "wandb.init picks it up. Useful for tying a BC+RL pipeline together.")
 
     # -- Video logging --
     parser.add_argument("--video", action=argparse.BooleanOptionalAction, default=None,
@@ -257,6 +266,44 @@ def _install_profiling_hooks(
     runner.alg.update = timed_update
 
 
+def _install_difficulty_curriculum(vec_env, runner, horizon: int | None) -> None:
+    """Ramp randomization difficulty from 0 → 1 over ``horizon`` iterations.
+
+    Semantics: ``horizon > 0`` → ``d = min(it / horizon, 1.0)``;
+    ``horizon == 0`` → static 1.0; ``horizon is None`` → no-op (env keeps
+    whatever static value was set via ``env_kwargs.difficulty``, default 0).
+
+    Hooks the call site after each ``alg.update`` so the curriculum advances
+    one step per learning iteration. The starting value is pushed before the
+    first rollout so the initial reset distribution matches ``d=0``.
+    """
+    if horizon is None:
+        return
+    horizon = int(horizon)
+    if horizon < 0:
+        raise ValueError(f"difficulty_horizon must be >= 0, got {horizon}")
+
+    def difficulty_for_iter(it: int) -> float:
+        if horizon == 0:
+            return 1.0
+        return min(float(it) / float(horizon), 1.0)
+
+    vec_env.set_difficulty(difficulty_for_iter(0))
+    print(f"[INFO] Curriculum: difficulty_horizon={horizon} "
+          f"(start={difficulty_for_iter(0):.3f}, reach 1.0 at iter {horizon})")
+
+    orig_update = runner.alg.update
+    state = {"iter": runner.current_learning_iteration}
+
+    def wrapped_update(*args, **kwargs):
+        out = orig_update(*args, **kwargs)
+        state["iter"] += 1
+        vec_env.set_difficulty(difficulty_for_iter(state["iter"]))
+        return out
+
+    runner.alg.update = wrapped_update
+
+
 def _default_wandb_project(env_meta: dict, obs_modalities: dict, algo: str = "ppo") -> str:
     """Derive a default wandb project like 'coffee_low_dim_ppo' from BC metadata.
 
@@ -321,6 +368,8 @@ def _build_train_cfg(args, bc_info) -> dict:
         cfg["num_envs"] = args.num_envs
     if args.save_interval is not None:
         cfg["save_interval"] = args.save_interval
+    if args.difficulty_horizon is not None:
+        cfg["difficulty_horizon"] = args.difficulty_horizon
     if args.init_noise_std is not None and not bc_info.is_gmm:
         # GMM has no state-independent std; CLI override only applies to the
         # Tanh-Gaussian fallback used for non-GMM BC policies.
@@ -381,6 +430,10 @@ def main():
         args.wandb_project = _default_wandb_project(bc_info.env_meta, bc_info.obs_modalities, algo_tag)
         if args.logger == "wandb":
             print(f"[INFO] W&B project (auto): {args.wandb_project}")
+
+    if args.wandb_group and args.logger == "wandb":
+        os.environ["WANDB_RUN_GROUP"] = args.wandb_group
+        print(f"[INFO] W&B group: {args.wandb_group}")
 
     # ------------------------------------------------------------------
     # 3. Build RSL-RL training config (ppo_cfg.json / dapg_cfg.json + BC fields + CLI)
@@ -511,6 +564,8 @@ def main():
         runner.alg.actor.to(device)
     else:
         print("[INFO] BC warm-start disabled (--no_warm_start); actor initialized randomly.")
+
+    _install_difficulty_curriculum(vec_env, runner, train_cfg.get("difficulty_horizon"))
 
     # ------------------------------------------------------------------
     # 6. Train

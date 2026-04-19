@@ -4,6 +4,7 @@
   "physics_timestep": 0.002,
   "max_iterations": 30000,
   "save_interval": 500,
+  "difficulty_horizon": 1000,
   "obs_groups": {
     "actor": ["policy"],
     "critic": ["policy"]
@@ -62,8 +63,7 @@
     "camera": null
   },
   "env_kwargs": {
-    "extra_randomization": false,
-    "tipover_prob": 0.0,
+    "tipover_prob": 0.1,
     "fall_off_termination": true
   }
 }
