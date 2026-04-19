@@ -1,6 +1,6 @@
 """Runner: benchmark each warp-knob individually vs baseline.
 
-Launches ``rl_mimicgen.rsl_rl.bench_warp_knobs`` once per configuration in
+Launches ``rl_mimicgen.rsl_rl.test.bench_warp_knobs`` once per configuration in
 its own subprocess (so warp kernels recompile cleanly against the new model
 options each time), collects the JSON-line results, and prints a summary
 table.
@@ -15,7 +15,7 @@ Default matrix (each row toggles ONE knob relative to the baseline):
 
 Example::
 
-    python -m rl_mimicgen.rsl_rl.bench_run \
+    python -m rl_mimicgen.rsl_rl.test.bench_run \
         --bc_checkpoint runs/coffee_d0_low_dim/.../models/model_2000.pth \
         --num_envs 4096 --horizon 400
 """
@@ -72,7 +72,7 @@ def run_one(cfg: dict, args: argparse.Namespace) -> dict | None:
             env.pop(leak)
 
     cmd = [
-        sys.executable, "-m", "rl_mimicgen.rsl_rl.bench_warp_knobs",
+        sys.executable, "-m", "rl_mimicgen.rsl_rl.test.bench_warp_knobs",
         "--bc_checkpoint", args.bc_checkpoint,
         "--num_envs", str(args.num_envs),
         "--horizon", str(args.horizon),

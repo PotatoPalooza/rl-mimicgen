@@ -1,6 +1,6 @@
 """Sweep per-step warp-sim time across num_envs.
 
-Launches ``rl_mimicgen.rsl_rl.bench_warp_knobs`` once per num_envs value,
+Launches ``rl_mimicgen.rsl_rl.test.bench_warp_knobs`` once per num_envs value,
 each in its own subprocess (so warp re-JITs against the new world count),
 with the same production settings ``train_rl.py`` uses: CUDA graph capture
 on, per-task buffer caps applied automatically via
@@ -16,7 +16,7 @@ and env-steps/s so sub-linear scaling shows up. Sample output::
 
 Example::
 
-    python -m rl_mimicgen.rsl_rl.bench_num_envs \\
+    python -m rl_mimicgen.rsl_rl.test.bench_num_envs \\
         --bc_checkpoint runs/robomimic_rl/.../bc_ckpt/model_2000.pth
 """
 
@@ -64,7 +64,7 @@ def run_one(num_envs: int, args: argparse.Namespace) -> dict | None:
         env.pop(leak, None)
 
     cmd = [
-        sys.executable, "-m", "rl_mimicgen.rsl_rl.bench_warp_knobs",
+        sys.executable, "-m", "rl_mimicgen.rsl_rl.test.bench_warp_knobs",
         "--bc_checkpoint", args.bc_checkpoint,
         "--num_envs", str(num_envs),
         "--horizon", str(args.horizon),

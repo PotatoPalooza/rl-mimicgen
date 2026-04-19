@@ -15,7 +15,7 @@ nonzero on any disagreement.
 
 Usage::
 
-    python -m rl_mimicgen.rsl_rl.test_warp_contact_parity
+    python -m rl_mimicgen.rsl_rl.test.test_warp_contact_parity
 """
 
 from __future__ import annotations

@@ -21,7 +21,7 @@ Graph capture is force-disabled during the audit to avoid confusing the
 
 Example::
 
-    python -m rl_mimicgen.rsl_rl.bench_jmax_audit \\
+    python -m rl_mimicgen.rsl_rl.test.bench_jmax_audit \\
         --bc_checkpoint runs/coffee_d0_low_dim/.../models/model_2000.pth \\
         --num_envs 2048 --horizon 400
 """

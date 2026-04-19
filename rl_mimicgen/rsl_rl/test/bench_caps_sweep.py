@@ -15,7 +15,7 @@ config VRAM to 4096 envs (linear upper bound) for planning.
 
 Usage::
 
-    python -m rl_mimicgen.rsl_rl.bench_caps_sweep \\
+    python -m rl_mimicgen.rsl_rl.test.bench_caps_sweep \\
         --bc_checkpoint runs/coffee_d0_low_dim/.../models/model_2000.pth \\
         --num_envs 256 \\
         --output_json bench_out/caps_sweep_coffee_d0_256.json
@@ -320,7 +320,7 @@ def run_sweep(args: argparse.Namespace) -> None:
         time.sleep(0.2)  # let sampler emit a few baseline rows
 
         cmd = [
-            sys.executable, "-m", "rl_mimicgen.rsl_rl.bench_caps_sweep",
+            sys.executable, "-m", "rl_mimicgen.rsl_rl.test.bench_caps_sweep",
             "--bc_checkpoint", args.bc_checkpoint,
             "--num_envs", str(args.num_envs),
             "--horizon", str(args.horizon),

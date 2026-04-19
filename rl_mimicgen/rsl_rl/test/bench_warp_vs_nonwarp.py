@@ -4,7 +4,7 @@ Rolls out N episodes under each backend on the same policy/env/horizon and
 reports per-backend success rate, return, and total wall time.
 
 Usage:
-    python -m rl_mimicgen.scripts.bench_warp_vs_nonwarp \
+    python -m rl_mimicgen.rsl_rl.test.bench_warp_vs_nonwarp \
         --checkpoint runs/.../models/model_epoch_100.pth \
         --num_episodes 10 --horizon 400
 """
