@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import random
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -24,7 +25,17 @@ DEFAULT_FINETUNE_FT_DENOISING_STEPS = 10
 DEFAULT_FINETUNE_SAVE_FREQ = 100
 DEFAULT_EVAL_EPISODES = 20
 DEFAULT_CHECKPOINT_EVAL_N_ENVS = 256
-DEFAULT_WANDB_PROJECT_PREFIX = "dppo-mimicgen"
+DEFAULT_WANDB_PROJECT_PREFIX = "dppo_mimicgen"
+_VARIANT_SUFFIX_RE = re.compile(r"_[doDO]\d+$")
+
+
+def _task_stem(dataset_id: str) -> str:
+    """Strip the trailing variant suffix (``_d<N>`` / ``_o<N>``) from a dataset id.
+
+    Keeps the project stable across variants so ``stack_d0`` and ``stack_d1``
+    share a project while still logging the variant as the wandb group.
+    """
+    return _VARIANT_SUFFIX_RE.sub("", dataset_id)
 
 
 def _render_wandb_block(stage: str, dataset_id: str, entity: str | None, group: str | None) -> str:
@@ -32,7 +43,7 @@ def _render_wandb_block(stage: str, dataset_id: str, entity: str | None, group: 
     group_yaml = "null" if group is None else group
     return f"""wandb:
   entity: {entity_yaml}
-  project: {DEFAULT_WANDB_PROJECT_PREFIX}-{dataset_id}-{stage}
+  project: {DEFAULT_WANDB_PROJECT_PREFIX}_{_task_stem(dataset_id)}-{stage}
   group: {group_yaml}
   run: ${{now:%H-%M-%S}}_${{name}}"""
 
@@ -194,6 +205,7 @@ def _render_lowdim_env_block(
     *,
     normalization_ref: str,
     include_warp_defaults: bool = False,
+    save_video: bool = False,
 ) -> str:
     warp_block = (
         """
@@ -206,13 +218,14 @@ def _render_lowdim_env_block(
         if include_warp_defaults
         else ""
     )
+    save_video_str = "true" if save_video else "false"
     return f"""env:
   n_envs: 50
   name: ${{env_name}}
   success_info_key: success
   best_reward_threshold_for_success: 1
   max_episode_steps: {spec.horizon}
-  save_video: False{warp_block}
+  save_video: {save_video_str}{warp_block}
   wrappers:
     robomimic_lowdim:
       normalization_path: {normalization_ref}
@@ -400,7 +413,7 @@ cond_steps: 1
 horizon_steps: 4
 act_steps: 4
 
-{_render_lowdim_env_block(spec, normalization_ref='${normalization_path}', include_warp_defaults=True)}
+{_render_lowdim_env_block(spec, normalization_ref='${normalization_path}', include_warp_defaults=True, save_video=True)}
 
 {wandb_block}
 
@@ -424,8 +437,8 @@ train:
   save_model_freq: {DEFAULT_FINETUNE_SAVE_FREQ}
   val_freq: 10
   render:
-    freq: 1
-    num: 0
+    freq: 25
+    num: 1
   reward_scale_running: True
   reward_scale_const: 1.0
   gae_lambda: 0.95
