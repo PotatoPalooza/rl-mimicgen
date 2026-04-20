@@ -17,9 +17,7 @@ BC run uses project ``<task>_<modality>``; the RL run uses
 
 Usage::
 
-    python -m rl_mimicgen.mimicgen.bc_to_rl_pipeline \\
-        --task coffee --variant D0 --modality low_dim \\
-        --bc_rollout_num_envs 256 --rl_num_envs 2048
+    python scripts/bc_to_rl_pipeline.py --task coffee --variant D0
 
 Pass ``--skip-bc --bc-output-dir <path>`` to reuse an existing BC run.
 """
@@ -40,8 +38,16 @@ from typing import Optional
 import torch
 
 
-WORKSPACE_DIR = Path(__file__).resolve().parents[2]
+WORKSPACE_DIR = Path(__file__).resolve().parents[1]
 DEFAULT_RUN_ROOT = WORKSPACE_DIR / "runs"
+
+# Pipeline-level defaults baked in (deliberately not CLI flags to keep the
+# entry point minimal). Override via --bc_extra / --rl_extra if needed:
+#   --bc_extra '--rollout-num-envs 128'
+#   --rl_extra '--num_envs 1024'
+MODALITY = "low_dim"
+BC_ROLLOUT_NUM_ENVS = 256  # low-variance SR signal for paper_bc_one_task
+RL_NUM_ENVS = 2048
 
 
 @dataclass
@@ -62,17 +68,8 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--task", required=True, help="MimicGen paper task (e.g. coffee, square).")
     p.add_argument("--variant", required=True, help="Dataset variant (D0, D1, D2, O1, ...).")
-    p.add_argument("--modality", default="low_dim", choices=("low_dim", "image"))
     p.add_argument("--algo", default="dapg", choices=("ppo", "dapg"),
                    help="RL algorithm for the second stage. Default: dapg.")
-
-    # BC knobs.
-    p.add_argument("--bc_rollout_num_envs", type=int, default=256,
-                   help="Num warp envs for BC rollouts. Default: 256 (low-variance SR).")
-
-    # RL knobs.
-    p.add_argument("--rl_num_envs", type=int, default=2048,
-                   help="Num warp envs for RL. Default: 2048.")
     p.add_argument("--rl_max_iterations", type=int, default=15000,
                    help="RL learning iterations. Default: 15000 (~20 h at 2048 envs / 4.7s per iter).")
 
@@ -153,13 +150,13 @@ def _run_bc(args: argparse.Namespace, group: str) -> Path:
         sys.executable, "-m", "rl_mimicgen.mimicgen.paper_bc_one_task",
         "--task", args.task,
         "--variant", args.variant,
-        "--modality", args.modality,
+        "--modality", MODALITY,
         "--algo", "bc",
         "--warp",
         "--logger", "wandb",
         "--wandb-group", group,
         "--async-rollouts",
-        "--rollout-num-envs", str(args.bc_rollout_num_envs),
+        "--rollout-num-envs", str(BC_ROLLOUT_NUM_ENVS),
         "--run-root", str(args.run_root.resolve()),
     ]
     if args.bc_extra:
@@ -168,7 +165,7 @@ def _run_bc(args: argparse.Namespace, group: str) -> Path:
     rc = _run(cmd, cwd=WORKSPACE_DIR)
     if rc != 0:
         raise SystemExit(f"BC training failed with exit code {rc}; halting before RL.")
-    return _latest_bc_run_dir(args.run_root.resolve(), _experiment_name(args.task, args.variant, args.modality))
+    return _latest_bc_run_dir(args.run_root.resolve(), _experiment_name(args.task, args.variant, MODALITY))
 
 
 def _run_rl(args: argparse.Namespace, group: str, bc_checkpoint: Path) -> Optional[Path]:
@@ -176,7 +173,7 @@ def _run_rl(args: argparse.Namespace, group: str, bc_checkpoint: Path) -> Option
     cmd = [
         sys.executable, "-m", "rl_mimicgen.rsl_rl.train_rl",
         "--bc_checkpoint", str(bc_checkpoint),
-        "--num_envs", str(args.rl_num_envs),
+        "--num_envs", str(RL_NUM_ENVS),
         "--max_iterations", str(args.rl_max_iterations),
         "--logger", "wandb",
         "--wandb_group", group,
@@ -241,7 +238,7 @@ def main() -> int:
         group=group,
         task=args.task,
         variant=args.variant,
-        modality=args.modality,
+        modality=MODALITY,
         algo=args.algo,
         bc_output_dir=str(bc_run_dir),
         bc_best_checkpoint=str(best_ckpt),

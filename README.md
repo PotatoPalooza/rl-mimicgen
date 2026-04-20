@@ -40,6 +40,43 @@ Or:
 just verify
 ```
 
+## Pipelines
+
+Both pipelines log to Weights & Biases — authenticate once:
+
+```bash
+wandb login
+```
+
+### BC → DAPG (robomimic + RSL-RL)
+
+```bash
+uv run python scripts/bc_to_rl_pipeline.py --task coffee --variant D0
+```
+
+Trains BC-RNN, picks the best-SR checkpoint, then warm-starts DAPG fine-tuning.
+Pass `--algo ppo` for PPO, or `--skip_bc --bc_output_dir <path>` to reuse an
+existing BC run. Env counts and rollout sizes are baked in; override via
+`--bc_extra` / `--rl_extra`.
+
+### DPPO (diffusion policy)
+
+```bash
+bash scripts/run_dppo_bc_to_rl.sh --task stack_d0
+```
+
+Wraps prepare → pretrain → sweep → eval-bc → finetune. Task specs live in
+`configs/mimicgen_tasks/`. Or run the stages manually:
+
+```bash
+uv run python scripts/run_official_dppo_mimicgen.py prepare  --task stack_d0
+uv run python scripts/run_official_dppo_mimicgen.py pretrain --task stack_d0
+uv run python scripts/run_official_dppo_mimicgen.py finetune --task stack_d0
+```
+
+`finetune` picks the best checkpoint from the latest pretrain run (async
+checkpoint-eval writes `best_checkpoint.pt`).
+
 ## Train
 
 Run the MimicGen one-task BC runner:
