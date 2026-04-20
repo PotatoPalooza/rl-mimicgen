@@ -139,7 +139,15 @@ def inspect_mimicgen_lowdim_dataset(
 
 
 def _stack_low_dim_obs(obs_group: h5py.Group, low_dim_keys: tuple[str, ...]) -> np.ndarray:
-    return np.hstack([np.asarray(obs_group[key], dtype=np.float32) for key in low_dim_keys])
+    stacked = []
+    for key in low_dim_keys:
+        values = np.asarray(obs_group[key], dtype=np.float32)
+        if values.ndim == 1:
+            values = values[:, None]
+        else:
+            values = values.reshape(values.shape[0], -1)
+        stacked.append(values)
+    return np.hstack(stacked)
 
 
 def _empty_like_columns(num_cols: int, dtype: np.dtype[np.floating]) -> np.ndarray:
