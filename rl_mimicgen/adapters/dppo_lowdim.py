@@ -45,7 +45,8 @@ def _render_wandb_block(stage: str, dataset_id: str, entity: str | None, group: 
   entity: {entity_yaml}
   project: {DEFAULT_WANDB_PROJECT_PREFIX}_{_task_stem(dataset_id)}-{stage}
   group: {group_yaml}
-  run: ${{now:%H-%M-%S}}_${{name}}"""
+  run: ${{now:%H-%M-%S}}_${{name}}
+  log_model: True"""
 
 
 def _ensure_local_repo_paths() -> None:

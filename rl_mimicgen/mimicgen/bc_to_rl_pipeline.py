@@ -176,7 +176,6 @@ def _run_rl(args: argparse.Namespace, group: str, bc_checkpoint: Path) -> Option
     cmd = [
         sys.executable, "-m", "rl_mimicgen.rsl_rl.train_rl",
         "--bc_checkpoint", str(bc_checkpoint),
-        "--warp",
         "--num_envs", str(args.rl_num_envs),
         "--max_iterations", str(args.rl_max_iterations),
         "--logger", "wandb",

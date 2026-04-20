@@ -266,6 +266,28 @@ def _latest_checkpoint_in_run_dir(run_dir: Path) -> Path:
     raise FileNotFoundError(f"No checkpoint found under run directory: {run_dir}")
 
 
+def _best_pretrain_checkpoint_for_task(log_root: Path, dataset_id: str) -> Path:
+    """Pick the best pretrain checkpoint for ``dataset_id``.
+
+    Walks pretrain run directories most-recent first and returns
+    ``best_checkpoint.pt`` (written by async checkpoint-eval's ``copy_best_to``)
+    if present, otherwise the latest ``state_*.pt`` in that run.
+    """
+    pretrain_root = log_root / "pretrain" / dataset_id
+    run_dirs = sorted(
+        {ckpt_dir.parent for ckpt_dir in pretrain_root.glob("**/checkpoint") if ckpt_dir.is_dir()},
+        key=_run_dir_sort_token,
+    )
+    if not run_dirs:
+        raise FileNotFoundError(f"No pretrain runs found for {dataset_id} under {log_root}")
+    for run_dir in reversed(run_dirs):
+        try:
+            return _latest_checkpoint_in_run_dir(run_dir)
+        except FileNotFoundError:
+            continue
+    raise FileNotFoundError(f"No pretrain checkpoints found for {dataset_id} under {log_root}")
+
+
 def _checkpoint_path_from_args(args: argparse.Namespace, log_root: Path, dataset_id: str) -> Path:
     checkpoint = getattr(args, "checkpoint", None)
     if checkpoint:
@@ -273,7 +295,7 @@ def _checkpoint_path_from_args(args: argparse.Namespace, log_root: Path, dataset
     run_dir = getattr(args, "run_dir", None)
     if run_dir:
         return _latest_checkpoint_in_run_dir(_resolve_repo_path(run_dir))
-    return _latest_checkpoint_for_task(log_root, dataset_id)
+    return _best_pretrain_checkpoint_for_task(log_root, dataset_id)
 
 
 def _merge_stage_config(base_config_path: Path, task_spec: DictConfig, stage: str, extra_dotlist: list[str]) -> DictConfig:
