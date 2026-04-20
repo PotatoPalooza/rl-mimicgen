@@ -119,7 +119,15 @@ class AsyncCheckpointEvalManager:
         self._inflight_lock = threading.Lock()
         self._stopped = False
 
-        self._eval_agent = self._build_eval_agent(
+        # Stash build kwargs so the worker thread can instantiate the eval
+        # agent itself. The offscreen MuJoCo render context (used for eval
+        # rollout videos) is EGL-backed and binds to the thread that calls
+        # ``gl_ctx.make_current()``. Building the eval agent here would bind
+        # it to the main training thread, leaving ``mjr_render`` on the
+        # worker reading an unbound framebuffer ("TV static" video frames).
+        # Moving construction onto the worker keeps the context current on
+        # the thread that actually renders.
+        self._build_kwargs: dict[str, Any] = dict(
             eval_config_dir=Path(eval_config_dir).expanduser().resolve(),
             eval_config_name=eval_config_name,
             initial_ema_state_dict=initial_ema_state_dict,
@@ -132,11 +140,22 @@ class AsyncCheckpointEvalManager:
             max_episode_steps=max_episode_steps,
             overrides=overrides,
         )
+        self._eval_agent = None
+        self._init_done = threading.Event()
+        self._init_error: BaseException | None = None
 
         self._worker = threading.Thread(
             target=self._run, name="async-dppo-eval", daemon=True
         )
         self._worker.start()
+
+        # Surface init errors to the caller the same way the old synchronous
+        # build did. This blocks until the worker either finishes building
+        # the eval agent or hits an error; callers never see a half-built
+        # manager.
+        self._init_done.wait()
+        if self._init_error is not None:
+            raise self._init_error
 
     # ------------------------------------------------------------------
     # Construction
@@ -333,6 +352,25 @@ class AsyncCheckpointEvalManager:
         return str(subdir)
 
     def _run(self) -> None:
+        # Build the eval agent on the worker thread so the offscreen GL
+        # context (created inside ``MjRenderContextOffscreen.__init__`` via
+        # ``gl_ctx.make_current()``) is bound to this thread — the same
+        # thread that will later call ``mjr_render``/``mjr_readPixels``.
+        # Building on the main thread and rendering here produces garbage
+        # framebuffer reads under EGL.
+        try:
+            self._eval_agent = self._build_eval_agent(**self._build_kwargs)
+        except BaseException as exc:
+            self._init_error = exc
+            log.exception("Async eval worker init failed")
+            self._init_done.set()
+            return
+        finally:
+            # Drop references to init-time state no longer needed by the
+            # worker; the initial EMA snapshot is the heaviest entry.
+            self._build_kwargs = {}
+        self._init_done.set()
+
         while True:
             item = self._request_q.get()
             if item is _SHUTDOWN:
@@ -349,6 +387,17 @@ class AsyncCheckpointEvalManager:
                     video_dir=self._video_dir_for_epoch(epoch),
                     video_prefix=f"state_{int(epoch)}",
                 )
+                # imageio only writes the mp4 moov atom on writer.close(), so
+                # the paths we hand back would otherwise be unfinalized mp4s.
+                # wandb.Video(path) hashes + copies the file eagerly, so
+                # finalize here on the worker thread before the main thread
+                # wraps them.
+                close_videos = getattr(self._eval_agent.venv, "close_videos", None)
+                if callable(close_videos):
+                    try:
+                        close_videos()
+                    except Exception:
+                        log.exception("venv.close_videos() failed")
             except BaseException as exc:  # surface the error to the main thread
                 error = exc
                 log.exception("Async eval worker failed for epoch %d", epoch)
