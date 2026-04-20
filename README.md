@@ -176,6 +176,10 @@ done
 
 This `prepare` step is what re-generates the official DPPO-derived config files under `dppo/cfg/mimicgen/generated/`. On a fresh machine, do not skip it even if the task specs already exist.
 
+Those generated configs intentionally contain machine-local absolute paths such as `robomimic_env_cfg_path`. They are checked in for convenience, but the local `prepare` step is what makes them valid on the current machine.
+
+Generated MimicGen low-dim DPPO configs also set `env.specific.robomimic_hard_reset: true`. Keep that setting when regenerating configs on other machines, since it avoids a rare robosuite worker-corruption failure seen under long-lived soft-reset workers.
+
 This bootstrap does three things:
 
 - install the shared Python environment

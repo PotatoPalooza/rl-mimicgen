@@ -325,6 +325,8 @@ Do not treat these as the primary source of truth:
 
 Those generated configs are derived artifacts. They are regenerated from the adapter and task spec workflow.
 
+On another machine, rerun `scripts/run_official_dppo_mimicgen.py prepare --task ...` before using them. The generated YAML files contain machine-local absolute paths such as `robomimic_env_cfg_path`, and the MimicGen low-dim DPPO env block now pins `env.specific.robomimic_hard_reset: true` to avoid a rare robosuite worker-corruption bug in long-lived soft-reset workers.
+
 ## Related Files
 
 - Launcher: [scripts/run_official_dppo_mimicgen.py](/home/nelly/projects/rl-mimicgen/scripts/run_official_dppo_mimicgen.py:1)

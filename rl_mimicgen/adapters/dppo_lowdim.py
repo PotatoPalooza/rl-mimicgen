@@ -194,6 +194,14 @@ def _yaml_list(values: tuple[str, ...]) -> str:
     return json.dumps(list(values))
 
 
+def _render_generated_config_header() -> str:
+    return (
+        "# Generated from rl_mimicgen.adapters.dppo_lowdim.\n"
+        "# On another machine, rerun `scripts/run_official_dppo_mimicgen.py prepare --task ...`\n"
+        "# to rewrite machine-local absolute paths such as `robomimic_env_cfg_path`.\n"
+    )
+
+
 def _render_lowdim_env_block(spec: MimicGenLowDimSpec, *, normalization_ref: str) -> str:
     return f"""env:
   n_envs: 50
@@ -202,6 +210,8 @@ def _render_lowdim_env_block(spec: MimicGenLowDimSpec, *, normalization_ref: str
   best_reward_threshold_for_success: 1
   max_episode_steps: {spec.horizon}
   save_video: False
+  specific:
+    robomimic_hard_reset: True
   wrappers:
     robomimic_lowdim:
       normalization_path: {normalization_ref}
@@ -271,7 +281,7 @@ def _render_pretrain_config(
     train_dataset_path = (artifact_dir / "train.npz").as_posix()
     logdir = (log_root / "pretrain" / spec.dataset_id / "${name}" / "${now:%Y-%m-%d}_${now:%H-%M-%S}_${seed}").as_posix()
     wandb_block = _render_wandb_block("pretrain", spec.dataset_id, wandb_entity)
-    return f"""defaults:
+    return f"""{_render_generated_config_header()}defaults:
   - _self_
 hydra:
   run:
@@ -362,7 +372,7 @@ def _render_finetune_config(spec: MimicGenLowDimSpec, artifact_dir: Path, log_ro
     base_policy_path = (artifact_dir / "override_base_policy_path.pt").as_posix()
     logdir = (log_root / "finetune" / spec.dataset_id / "${name}" / "${now:%Y-%m-%d}_${now:%H-%M-%S}_${seed}").as_posix()
     wandb_block = _render_wandb_block("finetune", spec.dataset_id, wandb_entity)
-    return f"""defaults:
+    return f"""{_render_generated_config_header()}defaults:
   - _self_
 hydra:
   run:
@@ -429,7 +439,7 @@ def _render_eval_bc_config(spec: MimicGenLowDimSpec, artifact_dir: Path, log_roo
     env_meta_path = (artifact_dir / "env_meta.json").as_posix()
     base_policy_path = (artifact_dir / "override_base_policy_path.pt").as_posix()
     logdir = (log_root / "eval" / spec.dataset_id / "${name}" / "${now:%Y-%m-%d}_${now:%H-%M-%S}_${seed}").as_posix()
-    return f"""defaults:
+    return f"""{_render_generated_config_header()}defaults:
   - _self_
 hydra:
   run:
@@ -480,7 +490,7 @@ def _render_eval_rl_init_config(spec: MimicGenLowDimSpec, artifact_dir: Path, lo
     env_meta_path = (artifact_dir / "env_meta.json").as_posix()
     base_policy_path = (artifact_dir / "override_base_policy_path.pt").as_posix()
     logdir = (log_root / "eval" / spec.dataset_id / "${name}" / "${now:%Y-%m-%d}_${now:%H-%M-%S}_${seed}").as_posix()
-    return f"""defaults:
+    return f"""{_render_generated_config_header()}defaults:
   - _self_
 hydra:
   run:
