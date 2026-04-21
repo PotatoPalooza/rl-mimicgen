@@ -8,16 +8,17 @@ Usage:
 
 Runs the official low-dim DPPO pipeline for one MimicGen task:
 1. prepare task artifacts/configs
-2. pretrain BC
-3. sweep saved BC checkpoints
-4. eval the best swept BC checkpoint
-5. finetune RL from that best checkpoint
+2. pretrain BC (async checkpoint-eval picks the best state and writes
+   best_checkpoint.pt into the run dir)
+3. eval the best BC checkpoint
+4. finetune RL from that best checkpoint
+
+eval-bc and finetune omit --checkpoint and let the launcher auto-resolve
+the most recent pretrain run's best_checkpoint.pt (falling back to the
+latest state_*.pt if async eval was disabled).
 
 Options:
   --task TASK             Required task id or path to a task spec YAML.
-  --every-n N             Optional sweep checkpoint stride override. Default: 2
-  --n-episodes N          Optional sweep completed-episode override. Default: 10
-  --checkpoint-dir PATH   Optional checkpoint directory to sweep.
   --group GROUP           Optional wandb group tag (default: variant suffix of
                           --task, e.g. stack_d0 -> d0). Links BC + RL runs.
   --mujoco-gl BACKEND     MuJoCo GL backend for every stage (exports MUJOCO_GL).
@@ -26,15 +27,12 @@ Options:
 
 Examples:
   scripts/run_dppo_bc_to_rl.sh --task coffee_d1
-  scripts/run_dppo_bc_to_rl.sh --task square_d0 --every-n 2 --n-episodes 20
+  scripts/run_dppo_bc_to_rl.sh --task square_d0
   MUJOCO_GL=osmesa scripts/run_dppo_bc_to_rl.sh --task stack_d0     # WSL
 EOF
 }
 
 TASK=""
-EVERY_N="2"
-N_EPISODES="10"
-CHECKPOINT_DIR=""
 GROUP=""
 MUJOCO_GL_FLAG=""
 
@@ -42,18 +40,6 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --task)
       TASK="$2"
-      shift 2
-      ;;
-    --every-n)
-      EVERY_N="$2"
-      shift 2
-      ;;
-    --n-episodes)
-      N_EPISODES="$2"
-      shift 2
-      ;;
-    --checkpoint-dir)
-      CHECKPOINT_DIR="$2"
       shift 2
       ;;
     --group)
@@ -98,10 +84,6 @@ if [[ -n "$GROUP" ]]; then
   echo "==> wandb group: $GROUP"
 fi
 
-task_name="$(basename "$TASK")"
-task_name="${task_name%.yaml}"
-dataset_id="$task_name"
-
 echo "==> Preparing $TASK"
 (
   cd "$REPO_ROOT"
@@ -114,68 +96,14 @@ echo "==> Pretraining BC for $TASK"
   "$PYTHON_BIN" "$LAUNCHER" pretrain --task "$TASK"
 )
 
-if [[ -z "$CHECKPOINT_DIR" ]]; then
-  latest_checkpoint="$(
-    find "$REPO_ROOT/logs/official_dppo/mimicgen/pretrain/$dataset_id" -path '*/checkpoint/state_*.pt' 2>/dev/null \
-      | sort | tail -1
-  )"
-  if [[ -z "$latest_checkpoint" ]]; then
-    echo "Failed to find a pretrain checkpoint directory for task $dataset_id." >&2
-    exit 1
-  fi
-  CHECKPOINT_DIR="$(dirname "$latest_checkpoint")"
-fi
-
-sweep_args=(sweep --task "$TASK")
-if [[ -n "$EVERY_N" ]]; then
-  sweep_args+=(--every-n "$EVERY_N")
-fi
-if [[ -n "$N_EPISODES" ]]; then
-  sweep_args+=(--n-episodes "$N_EPISODES")
-fi
-if [[ -n "$CHECKPOINT_DIR" ]]; then
-  sweep_args+=(--checkpoint-dir "$CHECKPOINT_DIR")
-fi
-
-echo "==> Sweeping BC checkpoints for $TASK"
-tmp_sweep_json="$(mktemp)"
-(
-  cd "$REPO_ROOT"
-  "$PYTHON_BIN" "$LAUNCHER" "${sweep_args[@]}" | tee "$tmp_sweep_json"
-)
-
-latest_sweep_best="$(
-  "$PYTHON_BIN" - <<'PY' "$tmp_sweep_json"
-import json
-import sys
-from pathlib import Path
-
-payload_text = Path(sys.argv[1]).read_text(encoding="utf-8")
-start = payload_text.rfind("\n{")
-if start != -1:
-    payload_text = payload_text[start + 1 :]
-payload = json.loads(payload_text)
-print(payload.get("best_checkpoint_copy") or payload.get("best_checkpoint") or "")
-PY
-)"
-rm -f "$tmp_sweep_json"
-
-if [[ -z "$latest_sweep_best" ]]; then
-  echo "Failed to find best_checkpoint.pt for task $dataset_id after sweep." >&2
-  exit 1
-fi
-
 echo "==> Evaluating best BC checkpoint"
 (
   cd "$REPO_ROOT"
-  "$PYTHON_BIN" "$LAUNCHER" eval-bc --task "$TASK" --checkpoint "$latest_sweep_best"
+  "$PYTHON_BIN" "$LAUNCHER" eval-bc --task "$TASK"
 )
 
 echo "==> Finetuning RL from best BC checkpoint"
 (
   cd "$REPO_ROOT"
-  "$PYTHON_BIN" "$LAUNCHER" finetune --task "$TASK" --checkpoint "$latest_sweep_best"
+  "$PYTHON_BIN" "$LAUNCHER" finetune --task "$TASK"
 )
-
-echo "Best checkpoint:"
-echo "  $latest_sweep_best"
