@@ -80,7 +80,14 @@ def _sorted_demo_keys(data_group: h5py.Group) -> list[str]:
 
 
 def _default_low_dim_keys(obs_group: h5py.Group) -> tuple[str, ...]:
-    return tuple(sorted(key for key in obs_group.keys() if "image" not in key.lower()))
+    # Rank-2 filter excludes scalar-per-step keys (force/contact sensors stubbed to
+    # zero under warp); drop once those are plumbed through MjSimWarp.
+    return tuple(
+        sorted(
+            key for key in obs_group.keys()
+            if "image" not in key.lower() and obs_group[key].ndim >= 2
+        )
+    )
 
 
 def _safe_range(min_value: np.ndarray, max_value: np.ndarray) -> np.ndarray:
@@ -437,6 +444,7 @@ train:
     min_lr: 1e-3
   save_model_freq: {DEFAULT_FINETUNE_SAVE_FREQ}
   val_freq: 10
+  force_train: True  # skip upstream's deterministic val-eval rollout; redundant at warp n_envs
   render:
     freq: 25
     num: 1
