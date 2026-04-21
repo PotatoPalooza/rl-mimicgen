@@ -22,11 +22,8 @@ import re
 from typing import Optional
 
 
-# Keyed by the MimicGen short task name. Matched against the robosuite
-# env_name by stripping underscores and comparing as a prefix, with the
-# constraint that the trailing chars must be a variant suffix (``d<N>`` /
-# ``o<N>``) or end-of-string - so ``coffee`` does **not** match
-# ``CoffeePreparation_D0``.
+# Prefix match after underscore-strip; trailing chars must be a variant suffix
+# (``d<N>``/``o<N>``) or empty so ``coffee`` does not match ``CoffeePreparation_D0``.
 PER_TASK_WARP_BUFFER_SIZES: dict[str, dict[str, int]] = {}
 
 

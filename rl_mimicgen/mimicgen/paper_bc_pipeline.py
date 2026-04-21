@@ -111,10 +111,8 @@ class Config:
     logger: str
     wandb_project: Optional[str]
 
-    # Pipeline bookkeeping (configs, generated datasets, commands, stdout logs)
-    # lives under runs/logs/<script>/<stamp>/; actual training output goes
-    # directly under run_root (robomimic's get_exp_dir adds the
-    # <experiment.name>/<timestamp> hierarchy beneath).
+    # Bookkeeping under runs/logs/<script>/<stamp>/; training output under run_root
+    # (robomimic's get_exp_dir adds the <experiment.name>/<timestamp> hierarchy).
     @property
     def meta_dir(self) -> Path:
         return self.run_root / "logs" / SCRIPT_NAME / self.stamp

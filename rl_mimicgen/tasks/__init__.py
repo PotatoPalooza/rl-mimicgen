@@ -1,5 +1,7 @@
 """Package containing task implementations for various robotic environments."""
 
+from __future__ import annotations
+
 import os
 
 # Conveniences to other module directories via relative paths

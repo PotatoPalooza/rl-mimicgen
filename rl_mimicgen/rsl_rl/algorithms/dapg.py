@@ -1,7 +1,7 @@
 """Demo-Augmented Policy Gradient (DAPG) on top of RSL-RL's PPO.
 
 Reference: Rajeswaran et al., "Learning Complex Dexterous Manipulation with Deep
-Reinforcement Learning and Demonstrations" (RSS 2018) — https://arxiv.org/pdf/1709.10087
+Reinforcement Learning and Demonstrations" (RSS 2018) -- https://arxiv.org/pdf/1709.10087
 
 Augments each PPO mini-batch with a demonstration log-likelihood term:
 
@@ -19,11 +19,13 @@ no padding. The demo batch is a ``(T, B, obs_dim)`` tensor; we normalize via
 the actor's ``obs_normalizer``, run the raw ``nn.LSTM`` with ``hidden_state=None``
 (zero-init), then apply the MLP head and score the demo actions. RSL-RL's
 ``masks``/``unpad_trajectories`` pipeline is bypassed for demos because it
-only round-trips correctly when every chunk in the batch is full-length — a
+only round-trips correctly when every chunk in the batch is full-length -- a
 guarantee ``DemoStorage`` already makes.
 """
 
 from __future__ import annotations
+
+from typing import Any
 
 import torch
 from tensordict import TensorDict
@@ -44,7 +46,7 @@ class DAPG(PPO):
 
     def __init__(
         self,
-        *args,
+        *args: Any,
         demo_dataset_path: str,
         demo_obs_keys: list[str],
         demo_seq_length: int = 10,
@@ -53,14 +55,14 @@ class DAPG(PPO):
         dapg_lambda0: float = 0.1,
         dapg_lambda1: float = 0.995,
         dapg_batch_size: int = 64,
-        **kwargs,
+        **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
 
         if not self.actor.is_recurrent:
             raise ValueError(
                 "DAPG currently assumes a recurrent actor (BC-RNN warm-start). "
-                "Got a non-recurrent actor — extend DAPG before using."
+                "Got a non-recurrent actor -- extend DAPG before using."
             )
 
         self.demo_storage = DemoStorage(
@@ -85,10 +87,6 @@ class DAPG(PPO):
             f"{self.demo_storage.memory_mb():.1f} MB)"
         )
 
-    # ------------------------------------------------------------------
-    # Demo-side forward + loss
-    # ------------------------------------------------------------------
-
     def _demo_log_prob(self, demo_obs: TensorDict, demo_actions: torch.Tensor) -> torch.Tensor:
         """Compute per-timestep log pi(a|s) over a padded demo batch.
 
@@ -105,19 +103,13 @@ class DAPG(PPO):
         obs_cat = torch.cat([demo_obs[g] for g in actor.obs_groups], dim=-1)
         obs_norm = actor.obs_normalizer(obs_cat)
 
-        # Recurrent forward with zero initial hidden state — BC-RNN's training
-        # regime. Skip RSL-RL's masks/unpad wrapper: every demo chunk is
-        # full-length, so masking would be a no-op that also breaks shape
-        # assumptions inside unpad_trajectories.
+        # Zero initial hidden state matches BC-RNN training; chunks are
+        # full-length so RSL-RL's masks/unpad wrapper would misalign shapes.
         rnn_out, _ = actor.rnn.rnn(obs_norm, None)  # (T, B, hidden_dim)
 
         mlp_out = actor.mlp(rnn_out)  # (T, B, distribution.input_dim)
         actor.distribution.update(mlp_out)
         return actor.distribution.log_prob(demo_actions)  # (T, B)
-
-    # ------------------------------------------------------------------
-    # Training loop override
-    # ------------------------------------------------------------------
 
     def update(self) -> dict[str, float]:
         """PPO update with DAPG demo-augmented gradient mixed into each mini-batch.
@@ -225,11 +217,7 @@ class DAPG(PPO):
 
             loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy.mean()
 
-            # ---- DAPG demo term ------------------------------------------------
-            # Sample a demo mini-batch, score it under the current policy, and
-            # mix the negative-log-likelihood into the PPO loss. Weight scales
-            # with the mini-batch's max |advantage| so the demo gradient stays
-            # on the same order of magnitude as the policy gradient.
+            # Weight by max |adv| so the demo gradient tracks the policy gradient scale.
             demo_obs, demo_actions = self.demo_storage.sample(self.dapg_batch_size)
             demo_log_prob = self._demo_log_prob(demo_obs, demo_actions)  # (T, B)
             adv_scale = float(batch.advantages.detach().abs().max().item())

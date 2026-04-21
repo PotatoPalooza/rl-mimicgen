@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import isaaclab.utils.math as math_utils
 import torch
 from isaaclab.assets import Articulation, RigidObject

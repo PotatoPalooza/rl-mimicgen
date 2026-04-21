@@ -4,6 +4,7 @@ import json
 import random
 from collections import OrderedDict
 from pathlib import Path
+from typing import Any
 
 import imageio
 import numpy as np
@@ -23,7 +24,7 @@ from rl_mimicgen.rl.storage import RolloutStorage
 
 
 class OnlineRLTrainer:
-    def __init__(self, config: OnlineRLConfig):
+    def __init__(self, config: OnlineRLConfig) -> None:
         self.config = config
         self.output_dir = Path(config.output_dir).expanduser().resolve()
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -479,13 +480,13 @@ class OnlineRLTrainer:
             self.demo_iter = iter(self.demo_loader)
             return next(self.demo_iter)
 
-    def _demo_batch_generator(self):
+    def _demo_batch_generator(self) -> Any:
         while True:
             if self.demo_iter is None:
                 return
             yield self._next_demo_batch()
 
-    def _build_vector_env(self):
+    def _build_vector_env(self) -> Any:
         factory, _, _ = make_robosuite_env_from_checkpoint(
             checkpoint_path=self.config.checkpoint_path,
             task_override=self.config.robosuite.env_name,
@@ -499,7 +500,7 @@ class OnlineRLTrainer:
             return ParallelRobomimicVectorEnv(env_fns, start_method=self.config.robosuite.start_method)
         return SerialRobomimicVectorEnv(env_fns)
 
-    def _build_eval_env(self, render: bool, render_offscreen: bool):
+    def _build_eval_env(self, render: bool, render_offscreen: bool) -> Any:
         factory, _, _ = make_robosuite_env_from_checkpoint(
             checkpoint_path=self.config.checkpoint_path,
             task_override=self.config.robosuite.env_name,
@@ -522,7 +523,7 @@ class OnlineRLTrainer:
         return int(self.bundle.config.experiment.rollout.horizon)
 
     @staticmethod
-    def _current_goal(env) -> dict[str, np.ndarray] | None:
+    def _current_goal(env: Any) -> dict[str, np.ndarray] | None:
         get_goal = getattr(env, "get_goal", None)
         if not callable(get_goal):
             return None
@@ -544,7 +545,7 @@ class OnlineRLTrainer:
         print(message, flush=True)
 
     @staticmethod
-    def _close_env(env) -> None:
+    def _close_env(env: Any) -> None:
         close_fn = getattr(env, "close", None)
         if callable(close_fn):
             close_fn()

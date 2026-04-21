@@ -12,7 +12,7 @@ MultiStep)`` contract:
   and ``truncated`` are ``(n_envs,)`` bool. Terminated envs auto-reset
   inside ``step`` to match ``reset_within_step=True`` MultiStep
   semantics.
-- ``venv.reset_arg(options_list)`` — per-env options dicts; supports
+- ``venv.reset_arg(options_list)`` -- per-env options dicts; supports
   ``options[i]["video_path"]`` to start an mp4 writer for env i.
 - ``venv.reset_one_arg(env_ind, options)``.
 - ``venv.seed([...])``.
@@ -105,7 +105,7 @@ class WarpRobomimicVectorEnv:
         self.device = torch.device(device)
         self.low_dim_keys = list(low_dim_keys)
 
-        # Normalization stats — upstream RobomimicLowdimWrapper uses min-max
+        # Normalization stats -- upstream RobomimicLowdimWrapper uses min-max
         # bounds (not mean/std) for obs, and uses min/max for action unnormalize.
         norm = np.load(normalization_path)
         self._obs_min = np.asarray(norm["obs_min"], dtype=np.float32)
@@ -115,13 +115,13 @@ class WarpRobomimicVectorEnv:
         self._action_range = np.maximum(self._action_max - self._action_min, 1e-8).astype(np.float32)
         self._obs_range = np.maximum(self._obs_max - self._obs_min, 1e-6).astype(np.float32)
 
-        # GPU-side normalize/unnormalize tensors — avoid per-substep host round-trips.
+        # GPU-side normalize/unnormalize tensors -- avoid per-substep host round-trips.
         self._action_min_t = torch.as_tensor(self._action_min, device=self.device)
         self._action_range_t = torch.as_tensor(self._action_range, device=self.device)
         self._obs_min_t = torch.as_tensor(self._obs_min, device=self.device)
         self._obs_max_t = torch.as_tensor(self._obs_max, device=self.device)
 
-        # Build env_meta for warp — merge per-task warp buffer caps + CLI overrides.
+        # Build env_meta for warp -- merge per-task warp buffer caps + CLI overrides.
         with open(robomimic_env_cfg_path, "r", encoding="utf-8") as f:
             env_meta = json.load(f)
         env_name = env_meta.get("env_name")
@@ -147,7 +147,7 @@ class WarpRobomimicVectorEnv:
 
         os.environ["ROBOSUITE_WARP_GRAPH"] = "1" if warp_graph_capture else "0"
 
-        # Obs modality init — upstream make_async does this per process; we do
+        # Obs modality init -- upstream make_async does this per process; we do
         # it once globally since warp uses a single sim instance.
         ObsUtils.initialize_obs_modality_mapping_from_dict({"low_dim": list(self.low_dim_keys)})
 
@@ -175,7 +175,7 @@ class WarpRobomimicVectorEnv:
             flatten_obs=False,
         )
 
-        # Action / observation space — gym-vector exposes single_* on the base
+        # Action / observation space -- gym-vector exposes single_* on the base
         # env; agent only reads single_action_space in the finetune path.
         action_dim = int(env.action_dimension)
         self.action_dim = action_dim
@@ -193,47 +193,30 @@ class WarpRobomimicVectorEnv:
         self.observation_space = self.single_observation_space
         self.action_space = self.single_action_space
 
-        # Per-env episode-step counters for MultiStep-style truncation. GPU
-        # tensor so we can mask it without a CPU round-trip per substep.
         self._cnt_t = torch.zeros(self.n_envs, dtype=torch.int64, device=self.device)
 
-        # Obs history ring buffer — shape (n_envs, n_obs_steps, obs_dim), stores
-        # the most recent n_obs_steps normalized flat obs per env (with left-
-        # padding after a reset so the earliest slot is the reset obs). Lives
-        # on GPU to avoid a per-substep device->host copy; synced to CPU only
-        # when returning from step()/reset().
+        # GPU-resident ring buffer avoids a per-substep device->host copy;
+        # CPU sync only on return from step()/reset().
         self._obs_history_t = torch.zeros(
             (self.n_envs, self.n_obs_steps, self.obs_dim),
             dtype=torch.float32,
             device=self.device,
         )
 
-        # Per-env video writers: list[imageio.Writer | None]. Only env indexes
-        # with options["video_path"] on reset get a writer.
         self._video_writers: list[Any] = [None] * self.n_envs
         self._render_mj_data = None
         self._render_camera_id: int | None = None
 
-        # Do an initial reset so downstream probes for observation_space /
-        # action_space have real data to work with; caller is free to invoke
-        # reset_arg again to start recording clips.
         self._initial_reset_done = False
         self._seed_deferred: list[int] | None = None
 
-    # ------------------------------------------------------------------
-    # Normalization helpers
-    # ------------------------------------------------------------------
-
     def _unnormalize_action_torch(self, actions_norm: torch.Tensor) -> torch.Tensor:
-        # Upstream: (action + 1) / 2 * (max - min) + min. Action comes in as
-        # [-1, 1]; we feed unnormalized to the sim so it matches what the
-        # demos used.
         return (actions_norm + 1.0) * 0.5 * self._action_range_t + self._action_min_t
 
-    def _flatten_raw_obs_gpu(self, obs_td) -> torch.Tensor:
+    def _flatten_raw_obs_gpu(self, obs_td: Any) -> torch.Tensor:
         """Concatenate per-key (N, *) tensors from RobomimicVecEnv into a
         flat ``(N, obs_dim)`` GPU tensor in the declared key order. No
-        host copy — concat stays on device.
+        host copy -- concat stays on device.
         """
         chunks: list[torch.Tensor] = []
         for key in self.low_dim_keys:
@@ -277,11 +260,7 @@ class WarpRobomimicVectorEnv:
         # Broadcast across the time dim for masked rows only.
         self._obs_history_t[reset_mask_t] = obs_normalized_t[reset_mask_t].unsqueeze(1)
 
-    # ------------------------------------------------------------------
-    # gym.vector-style API
-    # ------------------------------------------------------------------
-
-    def seed(self, seeds):
+    def seed(self, seeds: int | list[int]) -> None:
         if isinstance(seeds, (int, np.integer)):
             torch.manual_seed(int(seeds))
             np.random.seed(int(seeds))
@@ -332,18 +311,18 @@ class WarpRobomimicVectorEnv:
         return self._stacked_obs_dict()
 
     def step(
-        self, action_venv
+        self, action_venv: np.ndarray | torch.Tensor
     ) -> tuple[dict[str, np.ndarray], np.ndarray, np.ndarray, np.ndarray, list[dict]]:
         """Apply a chunk of ``act_steps`` normalized actions per env.
 
         ``action_venv``: ``(n_envs, act_steps, action_dim)`` in ``[-1, 1]``.
-        Accepts numpy *or* a torch tensor already on ``self.device`` — the
+        Accepts numpy *or* a torch tensor already on ``self.device`` -- the
         finetune agent can hand actions over without a D2H+H2D round trip.
 
         All per-substep accumulators live on GPU; one CPU sync happens at
         the end for the outer return values.
         """
-        if action_venv.ndim == 2:  # (n_envs, action_dim) — wrap single-step
+        if action_venv.ndim == 2:  # (n_envs, action_dim) -- wrap single-step
             action_venv = action_venv[:, None]
         assert action_venv.shape[0] == self.n_envs
         act_steps = action_venv.shape[1]
@@ -390,9 +369,7 @@ class WarpRobomimicVectorEnv:
             reward_sum_t = reward_sum_t + torch.where(active_t, reward_t, torch.zeros_like(reward_t))
             self._cnt_t = self._cnt_t + active_t.to(self._cnt_t.dtype)
 
-            # terminated vs truncated: inner dones are physics early-term /
-            # divergence; our own counter drives timeout truncation. Separating
-            # them keeps GAE bootstrap correct for the agent.
+            # Split done into terminated (physics) vs truncated (timeout) for GAE bootstrap.
             fresh_done_t = dones_t & active_t
             fresh_timeout_t = (self._cnt_t >= max_ep_t) & active_t
             truncated_t |= fresh_timeout_t
@@ -417,9 +394,6 @@ class WarpRobomimicVectorEnv:
             if bool(done_mask_t.all()):
                 break  # all envs finished; skip remaining sub-actions
 
-        # Force keyframe reset for envs that truncated but didn't trigger the
-        # inner wrapper's done branch (so the inner sim isn't held past
-        # horizon for those envs).
         need_reset_t = truncated_t & ~terminated_t
         if bool(need_reset_t.any()):
             self._inner._reset_envs(need_reset_t)
@@ -447,20 +421,16 @@ class WarpRobomimicVectorEnv:
                 pass
 
     # Gym-vector convenience methods the agent may call opportunistically.
-    def call(self, name: str, *args, **kwargs):
+    def call(self, name: str, *args: Any, **kwargs: Any) -> Any:
         raise NotImplementedError("WarpRobomimicVectorEnv.call is not supported")
 
-    def get_attr(self, name: str):
+    def get_attr(self, name: str) -> Any:
         raise NotImplementedError("WarpRobomimicVectorEnv.get_attr is not supported")
 
-    # ------------------------------------------------------------------
-    # Video helpers
-    # ------------------------------------------------------------------
-
-    def _open_video_writer(self, path: str):
+    def _open_video_writer(self, path: str) -> Any:
         """Open an mp4 writer with HTML5/wandb-browser-compatible settings.
 
-        Defaults in imageio-ffmpeg don't guarantee H.264 + yuv420p — on some
+        Defaults in imageio-ffmpeg don't guarantee H.264 + yuv420p -- on some
         builds you get yuv444p, which Chrome/Firefox/wandb's player refuse to
         play ("This video has no playable media."). Pin the codec, pixel
         format, macro-block size, and faststart so the moov atom lives at the

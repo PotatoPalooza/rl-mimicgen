@@ -1,7 +1,7 @@
 """Background-thread eval runner for upstream DPPO BC pretraining.
 
 BC pretraining's rollout-eval step is normally the dominant tail-cost after
-each ``save_model_freq`` checkpoint — the training loop blocks while the
+each ``save_model_freq`` checkpoint -- the training loop blocks while the
 eval subprocess finishes. ``AsyncCheckpointEvalManager`` moves that work
 onto a worker thread so training keeps making progress while evaluation
 runs in parallel on the same GPU (Python threads hold the GIL but CUDA
@@ -14,7 +14,7 @@ Design summary:
   - Each ``submit(epoch, state_dict)`` call eagerly clones the main
     model's EMA weights (``detach().clone()`` per tensor, stays on device)
     and pushes ``(epoch, state_dict_snapshot)`` onto a bounded queue. If
-    the queue is full, ``submit`` blocks — intended backpressure so
+    the queue is full, ``submit`` blocks -- intended backpressure so
     training can't get arbitrarily far ahead of evaluation.
   - The worker thread pops a request, loads the snapshot into the eval
     agent's model via ``load_pretrain_state_dict``, runs
@@ -119,14 +119,9 @@ class AsyncCheckpointEvalManager:
         self._inflight_lock = threading.Lock()
         self._stopped = False
 
-        # Stash build kwargs so the worker thread can instantiate the eval
-        # agent itself. The offscreen MuJoCo render context (used for eval
-        # rollout videos) is EGL-backed and binds to the thread that calls
-        # ``gl_ctx.make_current()``. Building the eval agent here would bind
-        # it to the main training thread, leaving ``mjr_render`` on the
-        # worker reading an unbound framebuffer ("TV static" video frames).
-        # Moving construction onto the worker keeps the context current on
-        # the thread that actually renders.
+        # Eval agent is built on the worker thread: MjRenderContextOffscreen's
+        # EGL context binds to the thread that calls gl_ctx.make_current(), and
+        # mjr_render from a different thread reads uninitialized framebuffer.
         self._build_kwargs: dict[str, Any] = dict(
             eval_config_dir=Path(eval_config_dir).expanduser().resolve(),
             eval_config_name=eval_config_name,
@@ -149,17 +144,10 @@ class AsyncCheckpointEvalManager:
         )
         self._worker.start()
 
-        # Surface init errors to the caller the same way the old synchronous
-        # build did. This blocks until the worker either finishes building
-        # the eval agent or hits an error; callers never see a half-built
-        # manager.
+        # Block so callers never see a half-built manager.
         self._init_done.wait()
         if self._init_error is not None:
             raise self._init_error
-
-    # ------------------------------------------------------------------
-    # Construction
-    # ------------------------------------------------------------------
 
     @staticmethod
     def _ensure_dppo_sys_path() -> None:
@@ -181,7 +169,7 @@ class AsyncCheckpointEvalManager:
         n_episodes: int | None,
         max_episode_steps: int | None,
         overrides: dict | None,
-    ):
+    ) -> Any:
         """Compose the Hydra eval cfg and instantiate ``EvalDiffusionAgent``."""
         self._ensure_dppo_sys_path()
 
@@ -191,7 +179,7 @@ class AsyncCheckpointEvalManager:
         from omegaconf import OmegaConf
 
         # Upstream's script/run.py registers these resolvers; do it here
-        # too so ${eval:…}, ${round_up:…}, ${round_down:…} all resolve.
+        # too so ${eval:...}, ${round_up:...}, ${round_down:...} all resolve.
         import math as _math
 
         for name, fn in (
@@ -201,13 +189,11 @@ class AsyncCheckpointEvalManager:
         ):
             try:
                 OmegaConf.register_new_resolver(name, fn, replace=True)
-            except Exception:  # resolver already registered — benign
+            except Exception:  # resolver already registered -- benign
                 pass
 
-        # Dump the initial EMA state_dict to a temp file and point the
-        # eval cfg's base_policy_path at it. The eval agent's DiffusionEval
-        # constructor expects an on-disk checkpoint — we feed it a real
-        # one built from the current training EMA weights, then delete.
+        # EvalDiffusionAgent requires an on-disk checkpoint; dump the initial
+        # EMA weights, point base_policy_path at the temp file, then delete.
         with tempfile.NamedTemporaryFile(
             prefix="dppo_async_eval_init_", suffix=".pt", delete=False
         ) as tmp_ckpt:
@@ -263,7 +249,7 @@ class AsyncCheckpointEvalManager:
             )
             eval_agent = cls(cfg)
         finally:
-            # Temp checkpoint is no longer needed — EvalDiffusionAgent
+            # Temp checkpoint is no longer needed -- EvalDiffusionAgent
             # has already loaded its contents into the eval model.
             try:
                 os.unlink(tmp_ckpt_path)
@@ -271,10 +257,6 @@ class AsyncCheckpointEvalManager:
                 pass
 
         return eval_agent
-
-    # ------------------------------------------------------------------
-    # Public API (main thread)
-    # ------------------------------------------------------------------
 
     def submit(self, epoch: int, ema_state_dict: dict) -> None:
         """Clone EMA weights and queue a rollout for ``epoch``.
@@ -284,10 +266,7 @@ class AsyncCheckpointEvalManager:
         if self._stopped:
             raise RuntimeError("AsyncCheckpointEvalManager is shut down")
 
-        # Per-tensor detach+clone: keeps tensors on their original device
-        # (cheap GPU→GPU copy) but breaks storage-sharing with the live
-        # model, so training can continue mutating weights while the
-        # worker consumes the snapshot.
+        # detach+clone breaks storage-sharing so training can mutate while worker consumes.
         snapshot = {
             k: v.detach().clone() for k, v in ema_state_dict.items()
         }
@@ -341,10 +320,6 @@ class AsyncCheckpointEvalManager:
             self._request_q.put(_SHUTDOWN)
         self._worker.join(timeout=timeout)
 
-    # ------------------------------------------------------------------
-    # Worker thread
-    # ------------------------------------------------------------------
-
     def _video_dir_for_epoch(self, epoch: int) -> str | None:
         if self._video_dir is None:
             return None
@@ -352,12 +327,8 @@ class AsyncCheckpointEvalManager:
         return str(subdir)
 
     def _run(self) -> None:
-        # Build the eval agent on the worker thread so the offscreen GL
-        # context (created inside ``MjRenderContextOffscreen.__init__`` via
-        # ``gl_ctx.make_current()``) is bound to this thread — the same
-        # thread that will later call ``mjr_render``/``mjr_readPixels``.
-        # Building on the main thread and rendering here produces garbage
-        # framebuffer reads under EGL.
+        # Build here so EGL context (gl_ctx.make_current() in
+        # MjRenderContextOffscreen.__init__) binds to the rendering thread.
         try:
             self._eval_agent = self._build_eval_agent(**self._build_kwargs)
         except BaseException as exc:
@@ -387,11 +358,8 @@ class AsyncCheckpointEvalManager:
                     video_dir=self._video_dir_for_epoch(epoch),
                     video_prefix=f"state_{int(epoch)}",
                 )
-                # imageio only writes the mp4 moov atom on writer.close(), so
-                # the paths we hand back would otherwise be unfinalized mp4s.
-                # wandb.Video(path) hashes + copies the file eagerly, so
-                # finalize here on the worker thread before the main thread
-                # wraps them.
+                # Finalize mp4s here -- wandb.Video(path) copies eagerly and imageio
+                # only writes the moov atom on writer.close().
                 close_videos = getattr(self._eval_agent.venv, "close_videos", None)
                 if callable(close_videos):
                     try:

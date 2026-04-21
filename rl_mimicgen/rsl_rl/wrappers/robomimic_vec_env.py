@@ -12,7 +12,7 @@ phases desynchronised across the batch.
 from __future__ import annotations
 
 import os
-from typing import Callable
+from typing import Any, Callable
 
 import torch
 import numpy as np
@@ -25,13 +25,13 @@ class _EnvCfg:
     """Small wrapper exposing a ``to_dict()`` method for RSL-RL's wandb writer.
 
     ``WandbSummaryWriter.store_config`` first tries ``env_cfg.to_dict()`` and
-    falls back to ``dataclasses.asdict(env_cfg)`` — a plain dict fails both.
+    falls back to ``dataclasses.asdict(env_cfg)`` -- a plain dict fails both.
     """
 
-    def __init__(self, **kwargs):
+    def __init__(self, **kwargs: Any) -> None:
         self.__dict__.update(kwargs)
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         return {k: v for k, v in self.__dict__.items()}
 
 
@@ -40,7 +40,7 @@ class RobomimicVecEnv(VecEnv):
 
     def __init__(
         self,
-        env,
+        env: Any,
         horizon: int,
         device: str = "cuda:0",
         clip_actions: float | None = None,
@@ -53,7 +53,7 @@ class RobomimicVecEnv(VecEnv):
         video_fps: int = 20,
         video_camera: str | None = None,
         flatten_obs: bool = True,
-    ):
+    ) -> None:
         """
         Args:
             env: A robomimic ``EnvRobosuite`` instance created with ``use_warp=True``.
@@ -101,9 +101,8 @@ class RobomimicVecEnv(VecEnv):
         self.episode_length_buf: torch.Tensor = torch.zeros(
             self.num_envs, dtype=torch.long, device=self.device
         )
-        # RSL-RL's wandb writer calls env_cfg.to_dict() before falling back to
-        # dataclasses.asdict(); a plain dict fails both branches. Use a tiny
-        # wrapper so the writer gets something usable.
+        # RSL-RL's wandb writer tries env_cfg.to_dict() then dataclasses.asdict();
+        # a plain dict fails both -- wrap so the writer gets something usable.
         self.cfg = _EnvCfg(
             env_name=env.env.__class__.__name__,
             num_envs=self.num_envs,
@@ -125,25 +124,15 @@ class RobomimicVecEnv(VecEnv):
         self._term_nan_count: int = 0         # ended early due to divergence
         self._term_early_count: int = 0       # ended early via _check_early_termination (any cause)
         self._term_timeout_count: int = 0     # ended via horizon timeout
-        # Per-cause counts keyed by the dict keys returned by
-        # ``_check_early_termination`` (e.g. "fell_off_coffee_pod"). Counts
-        # may overlap across causes when multiple causes fire on the same env.
+        # Counts can overlap across causes when multiple causes fire on one env.
         self._term_cause_counts: dict[str, int] = {}
-        # Every cause name ever returned by ``_check_early_termination`` in
-        # this process. Used at log-flush time so buckets that didn't fire
-        # in the current window still emit 0 rather than silently dropping
-        # out of the dashboard.
+        # Sticky set: cause keys emit 0 when not firing so dashboards don't drop series.
         self._early_term_causes_seen: set[str] = set()
 
-        # Most recent difficulty applied via set_difficulty(). None means no
-        # curriculum hook is active and the env's static difficulty (kwarg) is
-        # in effect — we skip logging a scalar in that case.
+        # None => no curriculum hook active; skip logging a scalar.
         self._current_difficulty: float | None = None
 
-        # Per-episode subtask tracking ("ever achieved during this episode").
-        # Populated lazily on the first step where the underlying env exposes
-        # _get_partial_task_metrics (Coffee, ThreePieceAssembly). Other tasks
-        # just have a single "task" key already covered by success_rate.
+        # Populated lazily from _get_partial_task_metrics if the env exposes it.
         self._subtask_keys: list[str] | None = None
         self._subtask_ever: dict[str, torch.Tensor] = {}
         self._subtask_buf: dict[str, list[float]] = {}
@@ -158,9 +147,6 @@ class RobomimicVecEnv(VecEnv):
         self._video_step_count: int = 0
         self._video_active: bool = False
         self._video_armed: bool = False
-        # Reusable CPU MjData + resolved camera id for the single-env render
-        # path. Lazy-init on first render to avoid paying the allocation when
-        # video is disabled.
         self._render_mj_data = None
         self._render_camera_id: int | None = None
         # True when the next step will be env 0's first step of a fresh episode.
@@ -169,12 +155,8 @@ class RobomimicVecEnv(VecEnv):
         self._video_frames: list[np.ndarray] = []
         self._video_start_step: int = 0
 
-        # Initial reset – also discovers observation keys
+        # Initial reset - also discovers observation keys
         self._full_reset()
-
-    # ------------------------------------------------------------------
-    # VecEnv interface
-    # ------------------------------------------------------------------
 
     def get_observations(self) -> TensorDict:
         assert self._cached_obs_td is not None
@@ -184,9 +166,7 @@ class RobomimicVecEnv(VecEnv):
         if self.clip_actions is not None:
             actions = torch.clamp(actions, -self.clip_actions, self.clip_actions)
 
-        # Video: arm on trigger, then begin capture only when env 0 is at the
-        # start of a fresh episode. This keeps each clip aligned to an episode
-        # boundary rather than cutting in mid-rollout.
+        # Arm on trigger, begin capture only at env-0 episode boundary.
         if (
             self._video_trigger is not None
             and not self._video_active
@@ -212,15 +192,9 @@ class RobomimicVecEnv(VecEnv):
         self.episode_length_buf += 1
         self._video_step_count += 1
 
-        # Detect per-env physics divergence (NaN qpos from solver non-convergence),
-        # reset just those envs, and mark them done. Rare at small nworld but
-        # unavoidable at large scale with f32 warp physics + aggressive actions.
+        # f32 warp physics can diverge at scale under aggressive actions.
         diverged = self._handle_divergence(obs_dict, actions)
 
-        # Task-specific early-termination failures from the env's
-        # _check_early_termination() hook. Each dict entry is a per-env bool
-        # mask for a named cause (e.g. "fell_off_coffee_pod"); envs terminate
-        # when any cause fires. Per-cause counts are logged separately.
         succeeded = self._success_mask()
         early_causes = self._early_term_dict()
         early_term = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
@@ -230,9 +204,7 @@ class RobomimicVecEnv(VecEnv):
         if early_term.any():
             obs_dict = self._reset_envs(early_term, obs_dict)
 
-        # Early termination on task success (does a keyframe-only reset of the
-        # succeeded envs; object-placement randomisation only happens at the
-        # horizon boundary via the full env.reset() below).
+        # Keyframe-only reset; object-placement randomisation only on horizon env.reset().
         if self.terminate_on_success:
             to_reset = succeeded & ~diverged  # diverged envs were already reset
             if to_reset.any():
@@ -249,7 +221,7 @@ class RobomimicVecEnv(VecEnv):
         # Accumulate per-subtask "ever achieved" flags.
         self._update_subtask_ever()
 
-        # Timeout check – all envs share the same horizon so they timeout together
+        # Timeout check - all envs share the same horizon so they timeout together
         timeouts = self.episode_length_buf >= self.max_episode_length
         if self.terminate_on_success:
             early = succeeded | diverged | early_term
@@ -261,9 +233,6 @@ class RobomimicVecEnv(VecEnv):
         env0_done = bool(dones[0].item())
         if self._video_active and env0_done:
             self._finalize_video()
-        # Env 0 resets inside this step (success / divergence / timeout branches
-        # above all call _reset_envs on env 0 when it's in the done mask), so
-        # the *next* step() call will be at the start of env 0's new episode.
         self._video_at_episode_start = env0_done
 
         # Per-env episode accounting
@@ -275,9 +244,7 @@ class RobomimicVecEnv(VecEnv):
             self._term_success_count += succ_early
             self._term_nan_count += int(diverged.sum().item())
             self._term_early_count += int(early_term.sum().item())
-            # Per-cause counts: count an env under a cause only when that cause
-            # actually drove the early termination (i.e. not pre-empted by
-            # divergence or success). Causes can overlap on the same env.
+            # Only count envs where the cause actually drove termination (not pre-empted).
             for cause, mask in early_causes.items():
                 effective = mask & ~diverged & ~succeeded
                 if effective.any():
@@ -288,11 +255,7 @@ class RobomimicVecEnv(VecEnv):
 
         extras: dict = {"time_outs": timeouts & ~early}
 
-        # Per-env timeout handling: reset only the envs that timed out (not the
-        # ones that already early-terminated this step). This keeps episode
-        # phases desynchronised across envs — otherwise any env hitting horizon
-        # would drag the whole batch back to buf=0, defeating
-        # init_at_random_ep_len.
+        # Reset only timed-out envs -- resetting all would defeat init_at_random_ep_len.
         timed_out = timeouts & ~early
         if timed_out.any():
             final_succ = self.env.is_success()["task"]
@@ -306,9 +269,6 @@ class RobomimicVecEnv(VecEnv):
             obs_dict = self._reset_envs(timed_out, obs_dict)
             self.episode_length_buf[timed_out] = 0
 
-        # Flush the rolling episode-stats buffers any time at least one env
-        # just closed an episode (early-term or timeout). With per-env resets
-        # this fires often; RSL-RL's Logger averages across steps per iter.
         if early.any() or timed_out.any():
             n_done = max(
                 self._term_success_count
@@ -328,9 +288,6 @@ class RobomimicVecEnv(VecEnv):
             extras["log"]["Episode_Termination/success"] = self._term_success_count / n_done
             extras["log"]["Episode_Termination/time_out"] = self._term_timeout_count / n_done
             extras["log"]["Episode_Termination/nan_term"] = self._term_nan_count / n_done
-            # Emit every cause ever seen this process, even if it had 0
-            # firings in the current window — keeps dashboards stable
-            # instead of dropping series in and out.
             for cause in sorted(self._early_term_causes_seen):
                 n = self._term_cause_counts.get(cause, 0)
                 extras["log"][f"Episode_Termination/{cause}"] = n / n_done
@@ -346,10 +303,7 @@ class RobomimicVecEnv(VecEnv):
             self._term_cause_counts = {}
 
         self._cached_obs_td = self._obs_dict_to_tensordict(obs_dict)
-        # Final NaN scrub: guarantee OnPolicyRunner.check_nan never trips even
-        # if the reset path left residual NaN (rare, but warp's global forward()
-        # after per-env restore can occasionally propagate). Silent — the
-        # divergence path already logged the event.
+        # Guard OnPolicyRunner.check_nan against residual NaN from warp's global forward().
         for key, tensor in list(self._cached_obs_td.items()):
             if torch.is_floating_point(tensor) and torch.isnan(tensor).any():
                 self._cached_obs_td[key] = torch.nan_to_num(tensor, nan=0.0, posinf=0.0, neginf=0.0)
@@ -381,20 +335,16 @@ class RobomimicVecEnv(VecEnv):
         self._current_difficulty = d
         return d
 
-    def close(self):
+    def close(self) -> None:
         pass
-
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
 
     def _render_env0(self) -> np.ndarray:
         """Render env 0 via a CPU mj_forward pass on a reusable MjData.
 
         The straightforward ``sim.render(env_idx=0)`` path calls
         ``mjwarp.get_data_into(world_id=0)``, which syncs the entire
-        ``(num_envs, …)`` warp SoA to CPU even though only env 0 is
-        needed — ~220ms at 2048 envs. We avoid that by copying just env
+        ``(num_envs, ...)`` warp SoA to CPU even though only env 0 is
+        needed -- ~220ms at 2048 envs. We avoid that by copying just env
         0's qpos/qvel to a pre-allocated CPU ``MjData``, running
         ``mj_forward`` to refresh xpos/xmat/site_xpos (everything the
         renderer reads), then pointing the offscreen context's data
@@ -420,7 +370,7 @@ class RobomimicVecEnv(VecEnv):
                 if self._video_camera is not None else None
             )
 
-        # Copy env 0's state from GPU → CPU (two small tensor slices).
+        # Copy env 0's state from GPU -> CPU (two small tensor slices).
         qpos0 = wp.to_torch(sim._warp_data.qpos)[0].detach().cpu().numpy()
         qvel0 = wp.to_torch(sim._warp_data.qvel)[0].detach().cpu().numpy()
         d = self._render_mj_data
@@ -463,7 +413,7 @@ class RobomimicVecEnv(VecEnv):
             with imageio.get_writer(path, fps=self._video_fps, codec="libx264", quality=6) as w:
                 for f in frames:
                     w.append_data(f)
-            print(f"[INFO] Video: wrote {len(frames)} frames → {path}")
+            print(f"[INFO] Video: wrote {len(frames)} frames -> {path}")
         except Exception as e:
             print(f"[WARN] video write failed ({path}): {e}")
 
@@ -487,7 +437,7 @@ class RobomimicVecEnv(VecEnv):
 
         if self._subtask_keys is None:
             # First call: discover which keys produce per-env bool tensors.
-            # Drop "task" — already covered by /episode/success_rate.
+            # Drop "task" -- already covered by /episode/success_rate.
             self._subtask_keys = []
             for k, v in metrics.items():
                 if k == "task":
@@ -512,7 +462,7 @@ class RobomimicVecEnv(VecEnv):
             self._subtask_buf[k].extend(ever[mask].float().cpu().tolist())
             ever[mask] = False
 
-    def _full_reset(self):
+    def _full_reset(self) -> None:
         obs_dict = self.env.reset()
         if self._obs_keys is None:
             self._obs_keys = sorted(obs_dict.keys())
@@ -531,7 +481,7 @@ class RobomimicVecEnv(VecEnv):
     def _find_diverged_envs(self, obs_dict: dict) -> torch.Tensor:
         """Return a (num_envs,) bool mask of envs with NaN state.
 
-        For warp sims, qpos is the single source of divergence — if physics
+        For warp sims, qpos is the single source of divergence -- if physics
         NaNs out it's always in qpos first, and every observation keyed off
         qpos inherits the NaN on the next kinematics pass. So one
         ``isnan(qpos).any(dim=1)`` replaces ~15 per-key isnan kernels.
@@ -593,12 +543,12 @@ class RobomimicVecEnv(VecEnv):
                 qpos = sim._warp_data.qpos.numpy()
                 qpos_nan = np.isnan(qpos).any(axis=1)
                 print(f"  qpos NaN in {int(qpos_nan.sum())}/{self.num_envs} envs "
-                      f"→ physics divergence (not an obs-extraction bug)")
+                      f"-> physics divergence (not an obs-extraction bug)")
             except Exception as e:
                 print(f"  [could not read sim state: {e}]")
             a = actions[first_env].detach().cpu().tolist() if isinstance(actions, torch.Tensor) else list(actions[first_env])
             print(f"  last action[env={first_env}] = {[f'{x:+.3f}' for x in a]}")
-            print(f"  → resetting these envs in-place, zero reward, marking done.")
+            print(f"  -> resetting these envs in-place, zero reward, marking done.")
             print(f"  (subsequent recoveries silent; cumulative count logged per "
                   f"episode-boundary under /episode/nan_resets)")
             print("=" * 72 + "\n", flush=True)
@@ -649,7 +599,7 @@ class RobomimicVecEnv(VecEnv):
         self._early_term_causes_seen.update(out.keys())
         return out
 
-    def _reset_envs(self, env_indices, obs_dict: dict | None = None) -> dict:
+    def _reset_envs(self, env_indices: torch.Tensor | list[int], obs_dict: dict | None = None) -> dict:
         """Per-env reset to a fresh random initial state (keyframe qpos/qvel +
         re-sampled object placements + task-specific reset hooks such as
         Coffee's hinge qpos).
@@ -658,7 +608,7 @@ class RobomimicVecEnv(VecEnv):
         envs' sim state flows through unchanged (no snapshot/restore needed)
         because every write is scoped to masked rows:
 
-        - ``sim.reset(env_indices=idxs)`` → ``mjwarp.reset_data(reset=mask)``
+        - ``sim.reset(env_indices=idxs)`` -> ``mjwarp.reset_data(reset=mask)``
           keyframes only masked envs' qpos/qvel/time.
         - Robot arm + gripper init qpos are written into masked rows of
           ``qpos`` via an indexed torch assign.
@@ -673,7 +623,7 @@ class RobomimicVecEnv(VecEnv):
 
         Non-Coffee tasks whose ``_reset_internal`` doesn't consult
         ``_reset_env_mask`` still get masked robot qpos and masked keyframe
-        reset, but their object placements are resampled full-batch — which
+        reset, but their object placements are resampled full-batch -- which
         is a correctness-neutral waste, not a bug (unmasked rows end up
         identical to their keyframe positions).
 
@@ -702,20 +652,13 @@ class RobomimicVecEnv(VecEnv):
         if not idxs:
             return obs_dict if obs_dict is not None else self.env.get_observation()
 
-        # 1. Keyframe-reset masked envs only (qpos/qvel/time).
         sim.reset(env_indices=idxs)
 
-        # 2. Write robot + gripper init qpos into masked rows of the qpos
-        #    tensor. The same init vector is broadcast across masked rows —
-        #    matches the scalar behaviour of ``robot.reset()`` (which writes
-        #    the same 7-vector to every env).
         self._apply_robot_init_qpos_masked(rsuite_inner, sim, idxs)
 
-        # 3. Task-specific reset hook. ``_reset_env_mask`` makes the placement
-        #    sampler batch-sample only for masked envs; ``_skip_robot_reset``
-        #    tells ``RobotEnv._reset_internal`` to skip the full-batch
-        #    ``robot.reset()`` loop (we already wrote arm qpos above, and the
-        #    controller state persists across our resets).
+        # _skip_robot_reset bypasses the full-batch robot.reset() loop (arm qpos
+        # written above, controller state persists -- stateful controllers would
+        # leak state across episodes, so drop this if that changes).
         rsuite_inner._reset_env_mask = reset_mask
         rsuite_inner._skip_robot_reset = True
         try:
@@ -723,13 +666,9 @@ class RobomimicVecEnv(VecEnv):
         finally:
             rsuite_inner._reset_env_mask = None
             rsuite_inner._skip_robot_reset = False
-        # ``_reset_internal`` already called ``sim.forward()``.
 
-        # 4. Single observation rebuild (fresh sensor values for the reset
-        #    envs; kept envs get unchanged values because their sim state
-        #    didn't move). Feed the raw dict through the robomimic wrapper
-        #    so it applies the "object-state" → "object" rename + robot-key
-        #    promotion + CUDA-tensor coercion.
+        # Kept envs keep prior obs (sim state didn't move); wrapper applies
+        # object-state rename + robot-key promotion + CUDA coercion.
         raw = rsuite_inner._get_observations(force_update=True)
         fresh = self.env.get_observation(di=raw)
         if obs_dict is None:
@@ -739,7 +678,7 @@ class RobomimicVecEnv(VecEnv):
                 obs_dict[k] = fresh[k]
         return obs_dict
 
-    def _apply_robot_init_qpos_masked(self, rsuite_inner, sim, idxs: list[int]) -> None:
+    def _apply_robot_init_qpos_masked(self, rsuite_inner: Any, sim: Any, idxs: list[int]) -> None:
         """Write arm + gripper init qpos into masked rows of ``sim.data.qpos``.
 
         Caches the init vectors + joint indexes on first call so subsequent
@@ -794,7 +733,7 @@ class RobomimicVecEnv(VecEnv):
         ``self._obs_keys`` are concatenated along the feature dim and stored
         under the ``"policy"`` key. When False (DPPO mode), each observation
         key becomes its own entry in the TensorDict, preserving original
-        per-key shapes — downstream consumers handle flattening themselves so
+        per-key shapes -- downstream consumers handle flattening themselves so
         per-key normalization stays meaningful.
         """
         per_key: dict[str, torch.Tensor] = {}

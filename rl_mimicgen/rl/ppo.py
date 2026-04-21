@@ -15,7 +15,7 @@ class DemoAugmentedPPO:
         self,
         policy: OnlinePolicyAdapter,
         demo_batch_iterator: Iterator[dict] | None = None,
-        demo_loss_fn=None,
+        demo_loss_fn: Any = None,
         demo_coef: float = 0.0,
         actor_learning_rate: float = 1e-4,
         critic_learning_rate: float = 1e-3,

@@ -8,6 +8,8 @@ drained by the training loop and logged to wandb using a ``local_step``
 metric so past-epoch rollouts plot correctly.
 """
 
+from __future__ import annotations
+
 from rl_mimicgen.dppo_async.async_eval import (
     AsyncCheckpointEvalManager,
     AsyncEvalResult,

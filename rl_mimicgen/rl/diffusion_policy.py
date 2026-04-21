@@ -76,10 +76,7 @@ class DiffusionOnlinePolicyAdapter(nn.Module):
         self.min_logprob_denoising_std = (
             None if min_logprob_denoising_std is None else float(min_logprob_denoising_std)
         )
-        # PPO rollouts must come from the same live policy weights that are
-        # later replayed inside the PPO objective. Using EMA samples for data
-        # collection makes the batch off-policy immediately, so the EMA path is
-        # reserved for deterministic evaluation only.
+        # EMA reserved for deterministic eval; PPO rollouts must be on-policy.
         self.use_ema_for_evaluation = bool(use_ema)
 
         self.value_net = ValueNetwork(
@@ -132,7 +129,7 @@ class DiffusionOnlinePolicyAdapter(nn.Module):
             )
         return configured_act_steps
 
-    def _build_sampling_scheduler(self, bundle: PolicyBundle):
+    def _build_sampling_scheduler(self, bundle: PolicyBundle) -> Any:
         if self.use_ddim:
             ddim_cfg = bundle.config.algo.ddim
             return DDIMScheduler(
@@ -218,7 +215,7 @@ class DiffusionOnlinePolicyAdapter(nn.Module):
         goal: dict[str, np.ndarray] | None,
         episode_starts: np.ndarray,
         clip_actions: bool = True,
-    ):
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         with torch.no_grad():
             self.actor.train()
             self.value_net.eval()
@@ -680,7 +677,7 @@ def _gaussian_log_prob_per_dim(value: torch.Tensor, mean: torch.Tensor, variance
 
 
 def _scheduler_reverse_stats(
-    scheduler,
+    scheduler: Any,
     model_output: torch.Tensor,
     timesteps: torch.Tensor,
     sample: torch.Tensor,

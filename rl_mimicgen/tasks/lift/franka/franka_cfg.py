@@ -3,6 +3,8 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
+from __future__ import annotations
+
 from isaaclab.assets import RigidObjectCfg
 from isaaclab.controllers.differential_ik_cfg import DifferentialIKControllerCfg
 from isaaclab.envs.mdp.actions.actions_cfg import DifferentialInverseKinematicsActionCfg
@@ -21,7 +23,7 @@ from rl_mimicgen.tasks.lift.lift_cfg import LiftEnvCfg
 
 @configclass
 class FrankaCubeLiftEnvCfg(LiftEnvCfg):
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         # post init of parent
         super().__post_init__()
 
@@ -90,7 +92,7 @@ class FrankaCubeLiftEnvCfg(LiftEnvCfg):
 
 @configclass
 class FrankaCubeLiftEnvCfg_PLAY(FrankaCubeLiftEnvCfg):
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         # post init of parent
         super().__post_init__()
         # make a smaller scene for play

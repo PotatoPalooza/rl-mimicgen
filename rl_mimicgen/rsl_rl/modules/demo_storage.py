@@ -31,7 +31,7 @@ class DemoStorage:
         seq_length: window size (should match BC-RNN training; default 10).
         stride: step between consecutive window starts. Defaults to ``seq_length``
             (non-overlapping). Use 1 to replicate BC-RNN's training-time sliding
-            window (costs ~seq_length× memory).
+            window (costs ~seq_lengthx memory).
         filter_key: optional HDF5 ``mask/<key>`` demo-subset filter.
         device: tensor destination.
         dtype: numeric dtype for stored obs/actions (default float32).
@@ -115,10 +115,6 @@ class DemoStorage:
         self.num_chunks: int = int(self.demo_obs.shape[1])
         self.n_demos_used: int = n_demos_used
         self.n_demos_skipped_short: int = n_demos_skipped_short
-
-    # ------------------------------------------------------------------
-    # API
-    # ------------------------------------------------------------------
 
     def sample(self, batch_size: int) -> tuple[TensorDict, torch.Tensor]:
         """Return a random batch of demo windows.

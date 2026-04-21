@@ -46,7 +46,7 @@ class RobosuiteCheckpointFactory:
     reward_shaping: bool | None = None
     horizon: int | None = None
 
-    def __call__(self):
+    def __call__(self) -> Any:
         _ensure_local_repo_paths()
 
         import mimicgen  # noqa: F401
@@ -181,7 +181,7 @@ class SerialRobomimicVectorEnv:
         return _stack_obs(goals)
 
 
-def _worker(remote, env_fn_bytes: bytes) -> None:
+def _worker(remote: Any, env_fn_bytes: bytes) -> None:
     _ensure_local_repo_paths()
     env_fn = cloudpickle.loads(env_fn_bytes)
     env = env_fn()

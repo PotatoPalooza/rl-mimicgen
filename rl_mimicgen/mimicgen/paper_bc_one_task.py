@@ -12,7 +12,7 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Iterable, Optional
+from typing import Any, Callable, Iterable, Optional
 
 from rl_mimicgen.diffusion_runtime import apply_runtime_profile_to_diffusion_payload, available_runtime_profiles
 from rl_mimicgen.mimicgen.runtime_checks import check_torch_cuda_compatibility
@@ -116,9 +116,6 @@ class Config:
     async_rollouts: bool
     rollout_num_envs: Optional[int]
 
-    # Pipeline bookkeeping lives under runs/logs/<script>/<stamp>/; training
-    # output goes directly under run_root (robomimic's get_exp_dir adds the
-    # <experiment.name>/<timestamp> hierarchy beneath).
     @property
     def meta_dir(self) -> Path:
         return self.run_root / "logs" / SCRIPT_NAME / self.stamp
@@ -284,7 +281,7 @@ class Runner:
         """Override ``experiment.rollout.{n, async_enabled}`` per CLI flags.
 
         ``rollout_num_envs`` drives the warp rollout env count (robomimic reads
-        ``rollout.n`` as ``num_envs`` when ``use_warp`` is set — see
+        ``rollout.n`` as ``num_envs`` when ``use_warp`` is set -- see
         ``robomimic/scripts/train.py:342``). ``async_rollouts`` toggles the
         threaded eval path (``rollout.async_enabled``).
         """
@@ -436,7 +433,7 @@ class Runner:
         json_path.write_text(json.dumps(payload, indent=4) + "\n", encoding="utf-8")
         self.logger.info("Applied diffusion runtime profile %s to %s", self.cfg.diffusion_runtime_profile, json_path)
 
-    def configure_bc(self, config, obs_modality: str):
+    def configure_bc(self, config: Any, obs_modality: str) -> Any:
         with config.train.values_unlocked():
             config.train.seq_length = 10
 
@@ -458,7 +455,7 @@ class Runner:
                 config.algo.rnn.hidden_dim = 1000
         return config
 
-    def configure_diffusion_policy(self, config, obs_modality: str):
+    def configure_diffusion_policy(self, config: Any, obs_modality: str) -> Any:
         if obs_modality == "low_dim":
             self.apply_low_dim_defaults(config)
         else:
@@ -474,7 +471,7 @@ class Runner:
 
         return config
 
-    def apply_low_dim_defaults(self, config) -> None:
+    def apply_low_dim_defaults(self, config: Any) -> None:
         with config.experiment.values_unlocked():
             config.experiment.save.enabled = True
             config.experiment.save.every_n_epochs = 200
@@ -502,7 +499,7 @@ class Runner:
             ]
             config.observation.modalities.obs.rgb = []
 
-    def apply_image_defaults(self, config) -> None:
+    def apply_image_defaults(self, config: Any) -> None:
         with config.experiment.values_unlocked():
             config.experiment.save.enabled = True
             config.experiment.save.every_n_epochs = 20
@@ -559,9 +556,6 @@ class Runner:
             train_cfg = payload.get("train")
             if not isinstance(train_cfg, dict):
                 raise ValueError(f"Generated config missing train settings: {config_path}")
-            # strip the generator's dataset-type prefix so experiment.name becomes
-            # <task>_<variant>_<modality> (e.g. coffee_d0_low_dim); robomimic's
-            # get_exp_dir will then produce runs/<experiment.name>/<timestamp>/...
             new_name = experiment_name
             for prefix in ("core_", "source_"):
                 if new_name.startswith(prefix):

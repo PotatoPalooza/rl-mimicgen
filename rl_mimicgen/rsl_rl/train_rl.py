@@ -14,6 +14,8 @@ Usage (wandb source)::
         --wandb_run user/proj/abc123 --wandb_model model_450.pth
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import os
@@ -23,7 +25,10 @@ import time
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
+
+# EGL is the right backend for Linux + NVIDIA; osmesa for WSL/CPU-only.
+os.environ.setdefault("MUJOCO_GL", "egl")
 
 import numpy as np
 import torch
@@ -40,6 +45,7 @@ from robomimic.utils.train_utils import suppress_warp_kernel_warnings
 from rsl_rl.runners import OnPolicyRunner
 
 from rl_mimicgen.rsl_rl import (
+    BCResumeInfo,
     RobomimicVecEnv,
     build_actor_hidden_dims,
     build_distribution_cfg_from_bc,
@@ -50,7 +56,7 @@ from rl_mimicgen.rsl_rl import (
 from rl_mimicgen.rsl_rl.warp_buffer_sizes import resolve_warp_buffer_sizes
 
 
-def parse_args():
+def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train RL on robomimic env with RSL-RL.")
 
     # -- BC warm-start source (exactly one required) --
@@ -76,7 +82,7 @@ def parse_args():
                         help="Override robosuite.macros.SIMULATION_TIMESTEP "
                              "(default 0.002). Larger values proportionally "
                              "reduce substeps per env.step (25 substeps at "
-                             "2ms → 13 at 4ms) — biggest sim-perf knob, but "
+                             "2ms -> 13 at 4ms) -- biggest sim-perf knob, but "
                              "trades fidelity (see CLAUDE.md warp perf notes). "
                              "Overrides ppo_cfg.json / dapg_cfg.json's "
                              "physics_timestep if set.")
@@ -86,7 +92,7 @@ def parse_args():
                              "PER_TASK_WARP_BUFFER_SIZES by env_name, falling "
                              "back to the class default (3500). Shrinking frees "
                              "GPU memory but can select different JIT-specialised "
-                             "warp kernels — see CLAUDE.md.")
+                             "warp kernels -- see CLAUDE.md.")
     parser.add_argument("--naconmax_per_env", type=int, default=None,
                         help="Override MjSimWarp per-env contact-buffer slice "
                              "(total naconmax = this x num_envs). Same fallback "
@@ -198,11 +204,11 @@ def parse_args():
 
 
 def _install_profiling_hooks(
-    vec_env,
-    runner,
+    vec_env: Any,
+    runner: Any,
     device: torch.device,
     report_every: int,
-    torch_profiler=None,
+    torch_profiler: Any | None = None,
 ) -> None:
     """Wrap env/alg methods with cuda-synced timers; print totals every `report_every`
     calls to alg.update (one per PPO iter). If torch_profiler is provided, also
@@ -213,10 +219,10 @@ def _install_profiling_hooks(
     state = {"iter": 0}
     use_cuda = device.type == "cuda"
 
-    def _wrap(obj, name, label):
+    def _wrap(obj: Any, name: str, label: str) -> None:
         orig = getattr(obj, name)
 
-        def wrapped(*args, **kwargs):
+        def wrapped(*args: Any, **kwargs: Any) -> Any:
             if use_cuda:
                 torch.cuda.synchronize()
             t0 = time.perf_counter()
@@ -236,7 +242,7 @@ def _install_profiling_hooks(
 
     orig_update = runner.alg.update
 
-    def timed_update(*args, **kwargs):
+    def timed_update(*args: Any, **kwargs: Any) -> Any:
         if use_cuda:
             torch.cuda.synchronize()
         t0 = time.perf_counter()
@@ -266,11 +272,11 @@ def _install_profiling_hooks(
     runner.alg.update = timed_update
 
 
-def _install_difficulty_curriculum(vec_env, runner, horizon: int | None) -> None:
-    """Ramp randomization difficulty from 0 → 1 over ``horizon`` iterations.
+def _install_difficulty_curriculum(vec_env: Any, runner: Any, horizon: int | None) -> None:
+    """Ramp randomization difficulty from 0 -> 1 over ``horizon`` iterations.
 
-    Semantics: ``horizon > 0`` → ``d = min(it / horizon, 1.0)``;
-    ``horizon == 0`` → static 1.0; ``horizon is None`` → no-op (env keeps
+    Semantics: ``horizon > 0`` -> ``d = min(it / horizon, 1.0)``;
+    ``horizon == 0`` -> static 1.0; ``horizon is None`` -> no-op (env keeps
     whatever static value was set via ``env_kwargs.difficulty``, default 0).
 
     Hooks the call site after each ``alg.update`` so the curriculum advances
@@ -295,7 +301,7 @@ def _install_difficulty_curriculum(vec_env, runner, horizon: int | None) -> None
     orig_update = runner.alg.update
     state = {"iter": runner.current_learning_iteration}
 
-    def wrapped_update(*args, **kwargs):
+    def wrapped_update(*args: Any, **kwargs: Any) -> Any:
         out = orig_update(*args, **kwargs)
         state["iter"] += 1
         vec_env.set_difficulty(difficulty_for_iter(state["iter"]))
@@ -317,7 +323,7 @@ def _default_wandb_project(env_meta: dict, obs_modalities: dict, algo: str = "pp
     return f"{env_name}_{obs_type}_{algo}"
 
 
-def _resolve_bc_source(args, download_dir: str):
+def _resolve_bc_source(args: argparse.Namespace, download_dir: str) -> BCResumeInfo:
     if args.bc_checkpoint is not None:
         return load_bc_checkpoint(args.bc_checkpoint)
     if args.wandb_model is None:
@@ -327,7 +333,7 @@ def _resolve_bc_source(args, download_dir: str):
     return load_bc_checkpoint(local_path)
 
 
-def _build_train_cfg(args, bc_info) -> dict:
+def _build_train_cfg(args: argparse.Namespace, bc_info: BCResumeInfo) -> dict[str, Any]:
     """Load PPO or DAPG config JSON, inject BC-derived RNN fields and runtime
     settings, and apply CLI overrides. Returns the dict passed to OnPolicyRunner.
     """
@@ -335,10 +341,7 @@ def _build_train_cfg(args, bc_info) -> dict:
     with open(cfg_path, "r") as f:
         cfg = json.load(f)
 
-    # BC-derived: shape the whole actor (RNN + MLP + head) to mirror the BC
-    # policy, so the weight transfer below is a structural copy rather than a
-    # random-init warm-start. The JSON file's actor fields act as fallbacks
-    # for anything BC doesn't pin down.
+    # Mirror BC actor shape so weight transfer is a structural copy; JSON fields are fallbacks.
     actor = cfg["actor"]
     actor["rnn_type"] = bc_info.rnn_type
     actor["rnn_hidden_dim"] = bc_info.rnn_hidden_dim
@@ -400,15 +403,12 @@ def _build_train_cfg(args, bc_info) -> dict:
     return cfg
 
 
-def main():
+def main() -> None:
     args = parse_args()
 
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
-    # ------------------------------------------------------------------
-    # 1. Log directory (also used as the BC-ckpt download cache)
-    # ------------------------------------------------------------------
     log_root = os.path.abspath(os.path.join("runs", args.experiment_name))
     run_stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     if args.run_name:
@@ -417,9 +417,6 @@ def main():
     os.makedirs(log_dir, exist_ok=True)
     print(f"[INFO] Logging to: {log_dir}")
 
-    # ------------------------------------------------------------------
-    # 2. Load BC-RNN source (local or wandb) -> config + weights
-    # ------------------------------------------------------------------
     bc_info = _resolve_bc_source(args, download_dir=os.path.join(log_dir, "bc_ckpt"))
     print(f"[INFO] BC-RNN config: type={bc_info.rnn_type} hidden_dim={bc_info.rnn_hidden_dim} "
           f"num_layers={bc_info.rnn_num_layers} obs_dim={bc_info.obs_dim} action_dim={bc_info.action_dim}")
@@ -435,9 +432,6 @@ def main():
         os.environ["WANDB_RUN_GROUP"] = args.wandb_group
         print(f"[INFO] W&B group: {args.wandb_group}")
 
-    # ------------------------------------------------------------------
-    # 3. Build RSL-RL training config (ppo_cfg.json / dapg_cfg.json + BC fields + CLI)
-    # ------------------------------------------------------------------
     train_cfg = _build_train_cfg(args, bc_info)
     args.num_envs = int(train_cfg.get("num_envs", 4096))
     cfg_path_used = args.dapg_cfg if args.dapg else args.ppo_cfg
@@ -458,12 +452,8 @@ def main():
               f"seq_length={alg['demo_seq_length']} batch={alg['dapg_batch_size']} "
               f"lambda0={alg['dapg_lambda0']} lambda1={alg['dapg_lambda1']}")
 
-    # ------------------------------------------------------------------
-    # 4. Create robomimic warp environment (from BC env metadata)
-    # ------------------------------------------------------------------
-    # Apply physics_timestep override (CLI > config). Must be done before the
-    # env is created — robosuite reads macros.SIMULATION_TIMESTEP at compile
-    # and also propagates it into each controller's timestep.
+    # Must set SIMULATION_TIMESTEP pre-env-creation: robosuite reads it at compile
+    # and propagates into each controller's timestep.
     cfg_timestep = train_cfg.get("physics_timestep")
     phys_ts = args.physics_timestep if args.physics_timestep is not None else cfg_timestep
     if phys_ts is not None:
@@ -487,7 +477,7 @@ def main():
     if cfg_env_kwargs and "coffee" in str(env_meta.get("env_name", "")).lower():
         env_meta.setdefault("env_kwargs", {}).update(cfg_env_kwargs)
 
-    # Per-task MjSimWarp buffer-size overrides. Table → CLI override order.
+    # Per-task MjSimWarp buffer-size overrides. Table -> CLI override order.
     # CLI values (if set) win over the table; task is inferred from env_name.
     warp_caps = resolve_warp_buffer_sizes(env_meta.get("env_name")) or {}
     if args.njmax_per_env is not None:
@@ -550,9 +540,6 @@ def main():
         )
     print(f"[INFO] obs_dim={obs_dim}  action_dim={vec_env.num_actions}  num_envs={vec_env.num_envs}")
 
-    # ------------------------------------------------------------------
-    # 5. Runner + BC warm-start
-    # ------------------------------------------------------------------
     runner = OnPolicyRunner(vec_env, train_cfg, log_dir=log_dir, device=args.device)
 
     if not args.no_warm_start:
@@ -567,9 +554,6 @@ def main():
 
     _install_difficulty_curriculum(vec_env, runner, train_cfg.get("difficulty_horizon"))
 
-    # ------------------------------------------------------------------
-    # 6. Train
-    # ------------------------------------------------------------------
     print(f"[INFO] Starting {'DAPG' if args.dapg else 'PPO'}: "
           f"{train_cfg['max_iterations']} iters, "
           f"{train_cfg['num_steps_per_env']} steps/env/update, {args.num_envs} envs")
@@ -582,7 +566,7 @@ def main():
                         torch.profiler.ProfilerActivity.CUDA],
             schedule=torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=1),
             on_trace_ready=lambda p: (p.export_chrome_trace(trace_path),
-                                      print(f"[PROFILE] torch trace → {trace_path}")),
+                                      print(f"[PROFILE] torch trace -> {trace_path}")),
         )
         torch_prof.start()
 

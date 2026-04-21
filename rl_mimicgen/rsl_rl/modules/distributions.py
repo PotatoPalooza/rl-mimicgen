@@ -2,7 +2,7 @@
 
 Two classes, one per BC head variant:
 
-* :class:`GMMDistribution` — mirrors ``RNNGMMActorNetwork``'s Mixture-of-Gaussians
+* :class:`GMMDistribution` -- mirrors ``RNNGMMActorNetwork``'s Mixture-of-Gaussians
   head (see ``robomimic.models.policy_nets.RNNGMMActorNetwork.forward_train``).
   The MLP outputs a flat vector of size ``2 * num_modes * ac_dim + num_modes``
   which is split into means, scales, and mixing logits. Means are tanh-squashed
@@ -11,10 +11,10 @@ Two classes, one per BC head variant:
   logits}``) can be stacked into the single final Linear layer RSL-RL's MLP
   produces.
 
-* :class:`TanhGaussianDistribution` — a :class:`GaussianDistribution` whose mean
+* :class:`TanhGaussianDistribution` -- a :class:`GaussianDistribution` whose mean
   is tanh-squashed. Matches BC-RNN (non-GMM), which hardcodes
   ``actions = torch.tanh(decoder_output)`` in ``RNNActorNetwork.forward``. No
-  Jacobian correction in ``log_prob`` — matches BC's own (slightly loose)
+  Jacobian correction in ``log_prob`` -- matches BC's own (slightly loose)
   treatment, which is what we want for warm-start equivalence.
 """
 
@@ -55,7 +55,7 @@ class GMMDistribution(Distribution):
                 (matches BC's low-noise-eval behavior; no effect during training).
             use_tanh: If True, do not tanh-squash the means here (BC's
                 ``use_tanh=True`` path wraps the mixture in a tanh-transformed
-                distribution instead — unsupported; falls back to no squash).
+                distribution instead -- unsupported; falls back to no squash).
         """
         super().__init__(output_dim)
         if std_activation not in self._STD_ACTIVATIONS:
@@ -68,10 +68,7 @@ class GMMDistribution(Distribution):
         self.low_noise_eval = bool(low_noise_eval)
         self.use_tanh = bool(use_tanh)
         if self.use_tanh:
-            # BC wraps the mixture in TanhWrappedDistribution; we don't replicate
-            # that here because it'd require a reparameterizable mixture sampler.
-            # Leaving means unsquashed is closer to "raw linear output" than
-            # applying a mismatched tanh, so we warn loudly.
+            # TanhWrappedDistribution requires a reparameterizable mixture sampler -- warn loudly.
             import warnings
             warnings.warn(
                 "GMMDistribution(use_tanh=True) is approximated: mean is not "
@@ -91,7 +88,7 @@ class GMMDistribution(Distribution):
     def input_dim(self) -> int:
         return 2 * self.num_modes * self.output_dim + self.num_modes
 
-    def _split(self, mlp_output: torch.Tensor):
+    def _split(self, mlp_output: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Slice the flat MLP output into (mean, scale, logits) with BC's post-processing."""
         n, d = self.num_modes, self.output_dim
         batch_shape = mlp_output.shape[:-1]
@@ -124,7 +121,7 @@ class GMMDistribution(Distribution):
         return self._distribution.sample()  # type: ignore
 
     def deterministic_output(self, mlp_output: torch.Tensor) -> torch.Tensor:
-        """Argmax-mode's mean — matches BC's ``low_noise_eval`` behavior."""
+        """Argmax-mode's mean -- matches BC's ``low_noise_eval`` behavior."""
         means, _, logits = self._split(mlp_output)
         idx = logits.argmax(dim=-1)  # (*batch,)
         idx_exp = idx.unsqueeze(-1).unsqueeze(-1).expand(*idx.shape, 1, self.output_dim)
@@ -209,7 +206,7 @@ class TanhGaussianDistribution(GaussianDistribution):
 
     Matches robomimic's ``RNNActorNetwork`` (non-GMM BC-RNN), which applies
     ``torch.tanh`` to the decoder output before returning actions. No Jacobian
-    correction is applied in ``log_prob`` — this matches BC's own treatment,
+    correction is applied in ``log_prob`` -- this matches BC's own treatment,
     keeping warm-start behavior consistent.
     """
 

@@ -6,6 +6,8 @@ single MuJoCo-Warp batched robosuite env. Wired into upstream DPPO via the
 ``env_type: warp`` branch in ``resources/dppo/env/gym_utils/__init__.py``.
 """
 
+from __future__ import annotations
+
 from rl_mimicgen.dppo_warp.warp_vector_env import WarpRobomimicVectorEnv
 
 __all__ = ["WarpRobomimicVectorEnv"]

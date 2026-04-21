@@ -173,7 +173,7 @@ class OnlinePolicyAdapter(nn.Module):
             return None
         return self.learned_log_std.detach().clamp(min=self.min_log_std)
 
-    def _dist_from_step(self, obs: dict[str, torch.Tensor], goal: dict[str, torch.Tensor] | None, rnn_state: Any = None):
+    def _dist_from_step(self, obs: dict[str, torch.Tensor], goal: dict[str, torch.Tensor] | None, rnn_state: Any = None) -> tuple[Any, Any]:
         if self.is_recurrent:
             if self.uses_stochastic_head:
                 dist, next_state = self.actor.forward_train_step(obs_dict=obs, goal_dict=goal, rnn_state=rnn_state)
@@ -195,7 +195,7 @@ class OnlinePolicyAdapter(nn.Module):
         obs: dict[str, torch.Tensor],
         goal: dict[str, torch.Tensor] | None,
         rnn_state: Any = None,
-    ):
+    ) -> tuple[Any, Any]:
         if self.is_recurrent:
             if self.uses_stochastic_head:
                 dist, next_state = actor_module.forward_train_step(obs_dict=obs, goal_dict=goal, rnn_state=rnn_state)
@@ -257,7 +257,7 @@ class OnlinePolicyAdapter(nn.Module):
             return _distribution_mode(dist)
         return actor_module(obs_dict=obs_batch, goal_dict=goal_batch)
 
-    def act(self, obs: dict[str, np.ndarray], goal: dict[str, np.ndarray] | None, episode_starts: np.ndarray, clip_actions: bool = True):
+    def act(self, obs: dict[str, np.ndarray], goal: dict[str, np.ndarray] | None, episode_starts: np.ndarray, clip_actions: bool = True) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         with torch.no_grad():
             # PPO rollouts must come from the same train-time distribution family
             # that PPO later replays against; eval mode can enable low_noise_eval.

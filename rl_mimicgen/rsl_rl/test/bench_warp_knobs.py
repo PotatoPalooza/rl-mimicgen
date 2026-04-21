@@ -140,9 +140,6 @@ def main() -> None:
     actor = build_actor_from_bc(bc_info, obs_td, obs_groups, device)
 
     ever_succeeded = torch.zeros(args.num_envs, dtype=torch.bool, device=device)
-    # Coffee exposes _get_partial_task_metrics: {"task","grasp","rim","insertion"}.
-    # Track per-env "ever achieved" flags during the rollout — sensitive even
-    # when final success is rare.
     partial_fn = getattr(vec_env.env.env, "_get_partial_task_metrics", None)
     partial_ever: dict[str, torch.Tensor] = {}
 

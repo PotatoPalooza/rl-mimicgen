@@ -1,16 +1,16 @@
 """Load a robomimic BC-RNN checkpoint (local or W&B) for RSL-RL warm-start.
 
 The extracted :class:`BCResumeInfo` carries everything needed to shape an
-RSL-RL ``RNNModel`` so the entire BC policy — RNN backbone, MLP trunk, and
-distribution head — can be copied over. That lets the RL actor start with a
+RSL-RL ``RNNModel`` so the entire BC policy -- RNN backbone, MLP trunk, and
+distribution head -- can be copied over. That lets the RL actor start with a
 policy identical (or near-identical) to the BC one, rather than just the
 recurrent backbone.
 
 Supports:
 
-* ``BC_RNN`` — MLP trunk + deterministic action head (tanh-squashed). Maps onto
+* ``BC_RNN`` -- MLP trunk + deterministic action head (tanh-squashed). Maps onto
   :class:`rl_mimicgen.rsl_rl.distributions.TanhGaussianDistribution`.
-* ``BC_RNN_GMM`` — MLP trunk + Mixture-of-Gaussians head. Maps onto
+* ``BC_RNN_GMM`` -- MLP trunk + Mixture-of-Gaussians head. Maps onto
   :class:`rl_mimicgen.rsl_rl.distributions.GMMDistribution`.
 
 Refuses transformer-based BC policies (``BC_Transformer*``) since RSL-RL's
@@ -33,7 +33,7 @@ class BCResumeInfo:
     rnn_hidden_dim: int
     rnn_num_layers: int
 
-    # -- MLP trunk (between RNN and head). ``[]`` means no trunk — rare but legal. --
+    # -- MLP trunk (between RNN and head). ``[]`` means no trunk -- rare but legal. --
     actor_layer_dims: list[int]
 
     # -- Obs / action shapes + wiring --
@@ -81,7 +81,7 @@ def _extract_dataset_path(cfg: dict) -> str | None:
     return None
 
 
-def _parse_config(raw) -> dict:
+def _parse_config(raw: str | dict) -> dict:
     return json.loads(raw) if isinstance(raw, str) else raw
 
 
@@ -113,7 +113,7 @@ def load_bc_checkpoint(path: str) -> BCResumeInfo:
     cfg = _parse_config(ckpt["config"])
     algo_name = str(cfg.get("algo_name", "")).lower()
 
-    # We only support BC policies whose forward pass is LSTM → MLP → head.
+    # We only support BC policies whose forward pass is LSTM -> MLP -> head.
     # Transformer / Diffusion BC variants don't fit the RSL-RL RNNModel shape.
     if "transformer" in algo_name:
         raise ValueError(
@@ -142,12 +142,8 @@ def load_bc_checkpoint(path: str) -> BCResumeInfo:
             "use_tanh": bool(gmm_cfg.get("use_tanh", False)),
         }
 
-    # BC's internal encoder concatenates obs in ``shape_metadata.all_shapes``
-    # iteration order, *not* the order in ``config.observation.modalities.obs.low_dim``
-    # (which is where robomimic decides *which* keys to use, but not their order).
-    # Match the internal order so the RSL-RL actor's flat-obs layout lines up
-    # with BC's LSTM input — otherwise the warm-started policy permutes its
-    # inputs relative to how it was trained.
+    # Order must match shape_metadata.all_shapes iteration (BC's encoder concat order),
+    # not config.observation.modalities.obs.low_dim -- otherwise warm-start permutes inputs.
     shape_meta = ckpt["shape_metadata"]
     low_dim_set = set(cfg["observation"]["modalities"]["obs"]["low_dim"])
     obs_keys = [k for k in shape_meta["all_shapes"] if k in low_dim_set]
@@ -179,10 +175,6 @@ def load_bc_checkpoint(path: str) -> BCResumeInfo:
     )
 
 
-# ---------------------------------------------------------------------------
-# Actor-config builders (derived from BC metadata)
-# ---------------------------------------------------------------------------
-
 def build_actor_hidden_dims(bc_info: BCResumeInfo) -> tuple[list[int], str]:
     """Return ``(hidden_dims, activation)`` for the RSL-RL actor MLP.
 
@@ -202,8 +194,8 @@ def build_actor_hidden_dims(bc_info: BCResumeInfo) -> tuple[list[int], str]:
 def build_distribution_cfg_from_bc(bc_info: BCResumeInfo, gaussian_init_std: float = 0.05) -> dict:
     """Return the ``actor.distribution_cfg`` dict that reproduces the BC head.
 
-    * ``BC_RNN_GMM`` → :class:`GMMDistribution` seeded with BC's GMM kwargs.
-    * ``BC_RNN`` (non-GMM) → :class:`TanhGaussianDistribution` with a small
+    * ``BC_RNN_GMM`` -> :class:`GMMDistribution` seeded with BC's GMM kwargs.
+    * ``BC_RNN`` (non-GMM) -> :class:`TanhGaussianDistribution` with a small
       state-independent std. Matches BC's forward-time ``tanh(decoder_output)``;
       std is state-independent because BC is deterministic at train time.
     """
@@ -219,10 +211,6 @@ def build_distribution_cfg_from_bc(bc_info: BCResumeInfo, gaussian_init_std: flo
     }
 
 
-# ---------------------------------------------------------------------------
-# Weight transfer
-# ---------------------------------------------------------------------------
-
 def _copy_rnn(actor_rnn: torch.nn.Module, bc_sd: dict, loaded: list, skipped: list) -> None:
     """Copy BC's nn.LSTM state_dict under ``policy.nets.rnn.nets.*`` into RSL-RL's."""
     src_prefix = "policy.nets.rnn.nets."
@@ -237,7 +225,7 @@ def _copy_rnn(actor_rnn: torch.nn.Module, bc_sd: dict, loaded: list, skipped: li
     actor_rnn.load_state_dict(target)
 
 
-def _copy_mlp_trunk(actor_mlp, bc_sd: dict, bc_num_trunk: int, actor_num_trunk: int, loaded: list, skipped: list) -> None:
+def _copy_mlp_trunk(actor_mlp: torch.nn.Module, bc_sd: dict, bc_num_trunk: int, actor_num_trunk: int, loaded: list, skipped: list) -> None:
     """Copy BC's MLP trunk into RSL-RL's MLP, padding with identity layers if needed.
 
     RSL-RL's MLP is a ``Sequential`` with Linears at even indices. We copy
@@ -278,7 +266,7 @@ def _copy_mlp_trunk(actor_mlp, bc_sd: dict, bc_num_trunk: int, actor_num_trunk: 
             continue
         if tgt_w.shape[0] != tgt_w.shape[1]:
             skipped.append(
-                f"mlp.{w_key} (pad layer not square {tuple(tgt_w.shape)} — can't identity-init)"
+                f"mlp.{w_key} (pad layer not square {tuple(tgt_w.shape)} -- can't identity-init)"
             )
             continue
         target[w_key] = torch.eye(tgt_w.shape[0], dtype=tgt_w.dtype)
@@ -288,11 +276,11 @@ def _copy_mlp_trunk(actor_mlp, bc_sd: dict, bc_num_trunk: int, actor_num_trunk: 
     actor_mlp.load_state_dict(target)
 
 
-def _copy_head(actor_mlp, bc_sd: dict, bc_info: BCResumeInfo, actor_num_trunk: int, loaded: list, skipped: list) -> None:
+def _copy_head(actor_mlp: torch.nn.Module, bc_sd: dict, bc_info: BCResumeInfo, actor_num_trunk: int, loaded: list, skipped: list) -> None:
     """Copy BC's decoder head into RSL-RL's final MLP Linear layer.
 
     RSL-RL builds a single Linear(hN, flat_out) as the final MLP layer. BC's
-    decoder is a ``ModuleDict`` of separate Linear heads — equivalent to a
+    decoder is a ``ModuleDict`` of separate Linear heads -- equivalent to a
     single Linear with rows concatenated along the output dim, which is what
     :class:`GMMDistribution` expects. For non-GMM, there's just one decoder
     head (``action``) that maps straight onto the final Linear.
@@ -338,7 +326,7 @@ def _copy_head(actor_mlp, bc_sd: dict, bc_info: BCResumeInfo, actor_num_trunk: i
 
 
 def copy_bc_weights_into_actor(
-    actor_model,
+    actor_model: torch.nn.Module,
     bc_info: BCResumeInfo,
 ) -> tuple[list[str], list[str]]:
     """Copy the full BC policy (RNN + MLP trunk + head) into an RSL-RL ``RNNModel``.
@@ -350,7 +338,7 @@ def copy_bc_weights_into_actor(
     so the combined network reproduces BC's decoder-from-RNN-output path.
 
     Returns ``(loaded_keys, skipped_keys)`` for diagnostics. If the final head
-    shape doesn't match, the head copy is skipped rather than raising — the
+    shape doesn't match, the head copy is skipped rather than raising -- the
     RNN + trunk still transfer.
     """
     loaded: list[str] = []
@@ -369,7 +357,7 @@ def copy_bc_weights_into_actor(
     return loaded, skipped
 
 
-def copy_rnn_weights_into_actor(actor_model, bc_state_dict: dict[str, torch.Tensor]) -> tuple[list[str], list[str]]:
+def copy_rnn_weights_into_actor(actor_model: torch.nn.Module, bc_state_dict: dict[str, torch.Tensor]) -> tuple[list[str], list[str]]:
     """Backwards-compatible RNN-only copy.
 
     Prefer :func:`copy_bc_weights_into_actor`, which transfers the full BC

@@ -3,6 +3,8 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
+from __future__ import annotations
+
 from dataclasses import MISSING
 
 import isaaclab.sim as sim_utils
@@ -112,7 +114,7 @@ class ObservationsCfg:
         )
         object = ObsTerm(func=mdp.object_obs, params={"eef_cfg": SceneEntityCfg("robot", body_names="panda_hand")})
 
-        def __post_init__(self):
+        def __post_init__(self) -> None:
             self.enable_corruption = False
             self.concatenate_terms = False
 
@@ -122,7 +124,7 @@ class ObservationsCfg:
 
         actions = ObsTerm(func=mdp.last_action)
 
-        def __post_init__(self):
+        def __post_init__(self) -> None:
             self.enable_corruption = True
             self.concatenate_terms = True
 
@@ -225,7 +227,7 @@ class LiftEnvCfg(ManagerBasedRLEnvCfg):
     events: EventCfg = EventCfg()
     curriculum: CurriculumCfg = CurriculumCfg()
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         """Post initialization."""
         # general settings
         self.decimation = 2

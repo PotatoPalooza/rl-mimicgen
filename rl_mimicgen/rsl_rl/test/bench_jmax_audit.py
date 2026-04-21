@@ -7,14 +7,14 @@ capture fits at 4096 envs (see CLAUDE.md "CUDA graph capture" notes).
 
 Approach:
   * Load a BC policy + warp vec-env (same path as ``bench_warp_knobs.py``).
-  * Pre-seed random per-env episode lengths so timeouts — and therefore
-    ``_reset_envs`` snapshot-restores — spread across steps, matching the RL
+  * Pre-seed random per-env episode lengths so timeouts -- and therefore
+    ``_reset_envs`` snapshot-restores -- spread across steps, matching the RL
     training behaviour with ``init_at_random_ep_len=True``.
   * Roll out ``horizon`` steps. After each step, read
     ``sim._warp_data.nefc.numpy().max()`` (per-world efc peak) and
     ``sim._warp_data.nacon.numpy()[0]`` (total contacts across all worlds).
   * Report observed peaks, current caps, and recommended new caps
-    (observed × ``--headroom``, rounded up).
+    (observed x ``--headroom``, rounded up).
 
 Graph capture is force-disabled during the audit to avoid confusing the
 ``.numpy()`` reads with captured-kernel state.
@@ -145,10 +145,7 @@ def main() -> None:
         device=args.device,
         obs_keys=bc_info.obs_keys,
     )
-    # NOTE: robosuite rebuilds `sim` on every `env.reset()` (hard_reset=True
-    # path destroys MjSimWarp and allocates a fresh one), and RobomimicVecEnv's
-    # snapshot-restore reset path ultimately calls env.reset() too. So we must
-    # re-fetch sim after every vec_env.step() rather than caching it.
+    # hard_reset=True destroys MjSimWarp -- re-fetch sim after every step.
     sim = vec_env.env.env.sim
     nworld = sim.num_envs
     njmax_cap = int(sim._effective_njmax_per_env)
@@ -165,10 +162,8 @@ def main() -> None:
         obs_td, _, dones, _ = vec_env.step(action)
         actor.reset(dones.bool())
 
-    # Full reset so the audit rollout starts from a clean slate, then pre-seed
-    # random episode lengths so per-env timeouts — and their snapshot-restore
-    # resets — spread across the rollout (matches init_at_random_ep_len=True
-    # from training).
+    # Seed random episode lengths so resets spread across the rollout (matches
+    # init_at_random_ep_len=True from training).
     obs_td, _ = vec_env.reset()
     actor.reset(torch.ones(args.num_envs, dtype=torch.bool, device=device))
     vec_env.episode_length_buf.copy_(
@@ -184,10 +179,7 @@ def main() -> None:
     nefc_samples: list[int] = []
     nacon_samples: list[int] = []
     n_resets_total: int = 0
-    # Count steps where at least one env's nefc ~saturated the cap. mujoco-warp
-    # silently clips nefc to njmax on overflow → constraints get dropped →
-    # physics can explode. If this count is non-zero for a chosen njmax, the
-    # cap is too low.
+    # mujoco-warp silently clips nefc to njmax on overflow -- non-zero => cap too low.
     n_nefc_clipped_steps: int = 0
     n_nacon_clipped_steps: int = 0
 

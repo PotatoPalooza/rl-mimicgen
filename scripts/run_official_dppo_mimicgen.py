@@ -13,6 +13,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+# EGL is the right backend for Linux + NVIDIA; osmesa for WSL/CPU-only. Setting
+# defensively so downstream subprocesses inherit the choice even on shells where
+# robosuite's macros.MUJOCO_GPU_RENDERING default hasn't fired yet.
+os.environ.setdefault("MUJOCO_GL", "egl")
+
 from omegaconf import DictConfig, OmegaConf
 
 from rl_mimicgen.adapters.dppo_lowdim import REPO_ROOT, materialize_mimicgen_lowdim_port
@@ -85,14 +90,115 @@ def _resolve_repo_path(path_like: str | None, default: str | Path | None = None)
     return (REPO_ROOT / path).resolve()
 
 
+_DEFAULT_TASK_SPEC_TEMPLATE = """dataset_id: {dataset_id}
+
+dataset:
+  path: runs/datasets/{dataset_type}/{dataset_id}.hdf5
+
+materialize:
+  output_root: runs/official_dppo_mimicgen
+  val_split: 0.0
+  split_seed: 0
+
+logging:
+  root: logs/official_dppo/mimicgen
+
+runtime:
+  mujoco_gl: egl
+  video_mujoco_gl: osmesa
+
+wandb:
+  entity: null
+
+pretrain:
+  config: {{}}
+
+finetune:
+  config:
+    env:
+      env_type: warp
+      n_envs: 1024
+      warp:
+        graph_capture: true
+        njmax_per_env: null
+        naconmax_per_env: null
+        physics_timestep: null
+    train:
+      # logprob_batch_size must be divisible by n_envs (1024).
+      logprob_batch_size: 10240
+
+eval_bc:
+  config:
+    n_episodes: 20
+    env:
+      n_envs: 20
+
+eval_rl_init:
+  config:
+    n_episodes: 20
+    env:
+      n_envs: 20
+
+sweep:
+  eval_mode: bc
+  device: cpu
+  n_envs: 20
+  n_episodes: 20
+  n_steps: {horizon}
+  max_episode_steps: {horizon}
+  every_n: 1
+  video_checkpoints: none
+  render_num: 1
+  skip_existing: true
+"""
+
+
+def _find_registered_mimicgen_task(task: str) -> tuple[str, int] | None:
+    """Return ``(dataset_type, horizon)`` for ``task`` if registered, else None."""
+    try:
+        from mimicgen import DATASET_REGISTRY
+    except ImportError:
+        return None
+    for dataset_type, tasks in DATASET_REGISTRY.items():
+        if task in tasks:
+            return dataset_type, int(tasks[task]["horizon"])
+    return None
+
+
+def _scaffold_task_spec(task: str, task_path: Path) -> None:
+    registry_hit = _find_registered_mimicgen_task(task)
+    if registry_hit is None:
+        raise FileNotFoundError(
+            f"Task spec not found: {task_path}\n"
+            f"Task {task!r} is also not in mimicgen DATASET_REGISTRY, so no "
+            f"auto-scaffold is possible. Author the yaml by hand (model on "
+            f"configs/mimicgen_tasks/stack_d0.yaml) or use a registered task."
+        )
+    dataset_type, horizon = registry_hit
+    content = _DEFAULT_TASK_SPEC_TEMPLATE.format(
+        dataset_id=task,
+        dataset_type=dataset_type,
+        horizon=horizon,
+    )
+    task_path.parent.mkdir(parents=True, exist_ok=True)
+    task_path.write_text(content, encoding="utf-8")
+    print(
+        f"[run_official_dppo_mimicgen] scaffolded default task spec at {task_path} "
+        f"(dataset_type={dataset_type}, horizon={horizon}). Edit to customize.",
+        flush=True,
+    )
+
+
 def _load_task_spec(task: str) -> tuple[DictConfig, Path]:
     candidate = Path(task).expanduser()
     if candidate.suffix in {".yaml", ".yml"}:
         task_path = candidate if candidate.is_absolute() else (REPO_ROOT / candidate)
+        if not task_path.exists():
+            raise FileNotFoundError(f"Task spec not found: {task_path}")
     else:
         task_path = TASK_SPECS_ROOT / f"{task}.yaml"
-    if not task_path.exists():
-        raise FileNotFoundError(f"Task spec not found: {task_path}")
+        if not task_path.exists():
+            _scaffold_task_spec(task, task_path)
     return OmegaConf.load(task_path), task_path.resolve()
 
 
@@ -159,8 +265,8 @@ def _ensure_dataset(task_spec: DictConfig) -> None:
 def _default_wandb_group(dataset_id: str) -> str:
     """Derive a default wandb group from the dataset id.
 
-    Strips the task stem so variants group together across tasks: ``stack_d0`` →
-    ``d0``, ``coffee_d1`` → ``d1``, ``mug_cleanup_o2`` → ``o2``. Falls back to
+    Strips the task stem so variants group together across tasks: ``stack_d0`` ->
+    ``d0``, ``coffee_d1`` -> ``d1``, ``mug_cleanup_o2`` -> ``o2``. Falls back to
     the full id if there's no trailing ``_d<N>`` / ``_o<N>`` suffix.
     """
     match = re.search(r"_([doDO]\d+)$", dataset_id)
@@ -373,7 +479,7 @@ _RUNTIME_KEY_TO_ENV = {
 def _subprocess_env(task_spec: DictConfig, *, for_video: bool = False, run_dir: Path | None = None) -> dict[str, str]:
     env = os.environ.copy()
     runtime_cfg = task_spec.get("runtime", {})
-    # Precedence: shell MUJOCO_GL (e.g. `MUJOCO_GL=osmesa …` on WSL) or the
+    # Precedence: shell MUJOCO_GL (e.g. `MUJOCO_GL=osmesa ...` on WSL) or the
     # --mujoco-gl flag (which main() exports into os.environ) > task spec.
     if not env.get("MUJOCO_GL"):
         backend_key = "video_mujoco_gl" if for_video else "mujoco_gl"
