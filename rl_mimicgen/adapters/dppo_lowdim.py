@@ -294,7 +294,7 @@ train_dataset_path: {train_dataset_path}
 
 seed: 42
 device: cuda:0
-env: {spec.dataset_id}
+env: {spec.env_name}
 obs_dim: {spec.obs_dim}
 action_dim: {spec.action_dim}
 denoising_steps: 20
@@ -387,7 +387,7 @@ normalization_path: {normalization_path}
 
 seed: 42
 device: cuda:0
-env_name: {spec.dataset_id}
+env_name: {spec.env_name}
 obs_dim: {spec.obs_dim}
 action_dim: {spec.action_dim}
 denoising_steps: 20
@@ -454,7 +454,7 @@ normalization_path: {normalization_path}
 
 seed: 42
 device: cuda:0
-env_name: {spec.dataset_id}
+env_name: {spec.env_name}
 obs_dim: {spec.obs_dim}
 action_dim: {spec.action_dim}
 denoising_steps: 20
@@ -505,7 +505,7 @@ normalization_path: {normalization_path}
 
 seed: 42
 device: cuda:0
-env_name: {spec.dataset_id}
+env_name: {spec.env_name}
 obs_dim: {spec.obs_dim}
 action_dim: {spec.action_dim}
 denoising_steps: 20
