@@ -339,3 +339,38 @@ Notes:
 - Both plain robomimic-style `.pth` checkpoints and residual-policy `.pt` artifacts are supported.
 - Use the original training config as the base `--config`, then override only eval-specific settings on the command line.
 - `--eval-num-envs` speeds up metric-only evaluation, but video export uses a single environment.
+
+## Queue Workers
+
+To run a simple shared task queue from `tmux`, edit:
+
+```bash
+scripts/dppo_batch_tasks.txt
+```
+
+Queue entries use one task per line:
+
+```text
+TODO hammer_cleanup_d0
+TODO coffee_preparation_d0
+TODO coffee_preparation_d1
+TODO kitchen_d0
+TODO kitchen_d1
+```
+
+Then start one or more workers:
+
+```bash
+cd /home/eric/projects/rl-mimicgen
+bash scripts/run_dppo_batch_worker.sh
+```
+
+Behavior:
+
+- each worker safely locks the queue file before claiming a task
+- a claimed task is rewritten from `TODO <task>` to `RUNNING <task> <worker> <timestamp>`
+- the worker runs the full pipeline via `scripts/run_dppo_bc_to_rl.sh --task <task>`
+- on success, the entry becomes `DONE <task> <worker> <timestamp>`
+- on failure, the entry becomes `FAILED <task> <worker> <timestamp>`
+- the worker keeps running serially until no `TODO` tasks remain
+- each claimed task gets its own log under `logs/official_dppo/mimicgen/batch/<run_id>/`

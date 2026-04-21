@@ -1,0 +1,14 @@
+# One task per line.
+# Valid queue states:
+#   TODO <task>
+#   RUNNING <task> <worker> <timestamp>
+#   DONE <task> <worker> <timestamp>
+#   FAILED <task> <worker> <timestamp>
+
+TODO hammer_cleanup_d0
+TODO coffee_preparation_d0
+TODO coffee_preparation_d1
+TODO kitchen_d0
+TODO kitchen_d1
+TODO nut_assembly_d0
+TODO pick_place_d0
