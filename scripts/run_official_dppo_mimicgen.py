@@ -373,10 +373,13 @@ _RUNTIME_KEY_TO_ENV = {
 def _subprocess_env(task_spec: DictConfig, *, for_video: bool = False, run_dir: Path | None = None) -> dict[str, str]:
     env = os.environ.copy()
     runtime_cfg = task_spec.get("runtime", {})
-    backend_key = "video_mujoco_gl" if for_video else "mujoco_gl"
-    mujoco_gl = runtime_cfg.get(backend_key) or runtime_cfg.get("mujoco_gl")
-    if mujoco_gl:
-        env["MUJOCO_GL"] = str(mujoco_gl)
+    # Precedence: shell MUJOCO_GL (e.g. `MUJOCO_GL=osmesa …` on WSL) or the
+    # --mujoco-gl flag (which main() exports into os.environ) > task spec.
+    if not env.get("MUJOCO_GL"):
+        backend_key = "video_mujoco_gl" if for_video else "mujoco_gl"
+        mujoco_gl = runtime_cfg.get(backend_key) or runtime_cfg.get("mujoco_gl")
+        if mujoco_gl:
+            env["MUJOCO_GL"] = str(mujoco_gl)
     for runtime_key, env_name in _RUNTIME_KEY_TO_ENV.items():
         value = runtime_cfg.get(runtime_key)
         if value is not None:
@@ -434,12 +437,24 @@ def _run_dppo_with_snapshot(task_spec: DictConfig, run_dir: Path, config_path: P
         raise subprocess.CalledProcessError(returncode, command)
 
 
+def _add_mujoco_gl_arg(p: argparse.ArgumentParser) -> None:
+    p.add_argument(
+        "--mujoco-gl",
+        default=None,
+        choices=("glx", "egl", "osmesa"),
+        help="Override MuJoCo's GL backend for this invocation (exports MUJOCO_GL "
+             "before spawning subprocesses). Beats the task spec's "
+             "runtime.mujoco_gl / runtime.video_mujoco_gl. Use `osmesa` on WSL.",
+    )
+
+
 def _prepare_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Task-spec launcher for official DPPO on MimicGen.")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     prepare = subparsers.add_parser("prepare", help="Materialize artifacts and generated configs for a task.")
     prepare.add_argument("--task", required=True, help="Task id or path to a task spec YAML.")
+    _add_mujoco_gl_arg(prepare)
 
     for stage_name in ("pretrain", "finetune", "eval-bc", "eval-rl-init"):
         stage = subparsers.add_parser(stage_name, help=f"Run {stage_name} through the official dppo launcher.")
@@ -454,6 +469,7 @@ def _prepare_parser() -> argparse.ArgumentParser:
             default=[],
             help="Optional OmegaConf dotlist override applied to the run snapshot.",
         )
+        _add_mujoco_gl_arg(stage)
 
     sweep = subparsers.add_parser("sweep", help="Sweep saved checkpoints for a task using the configured eval mode.")
     sweep.add_argument("--task", required=True, help="Task id or path to a task spec YAML.")
@@ -476,6 +492,7 @@ def _prepare_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional completed-episode target override for this sweep. Defaults to the task spec eval/sweep setting.",
     )
+    _add_mujoco_gl_arg(sweep)
 
     return parser
 
@@ -629,6 +646,11 @@ def _run_sweep(args: argparse.Namespace) -> None:
 def main() -> None:
     _register_resolvers()
     args = _prepare_parser().parse_args()
+    # --mujoco-gl piggybacks on the shell env var so every downstream codepath
+    # (_subprocess_env for subprocesses, and any in-process mujoco import on
+    # the prepare stage) picks it up uniformly.
+    if getattr(args, "mujoco_gl", None):
+        os.environ["MUJOCO_GL"] = args.mujoco_gl
     if args.command == "prepare":
         task_spec, _ = _load_task_spec(args.task)
         _run_prepare(task_spec)

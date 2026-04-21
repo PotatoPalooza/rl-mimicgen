@@ -79,26 +79,50 @@ checkpoint-eval writes `best_checkpoint.pt`).
 
 ### WSL video rendering
 
-MuJoCo's default `glx`/`egl` backends need WSLg or an X server. On plain WSL2
-the offscreen render context fails and videos come out corrupt. Install
-OSMesa (software rasterizer, works everywhere) and point the task spec at it:
+MuJoCo's default `glx` backend needs an X server; on plain WSL2 the offscreen
+render context fails and videos come out corrupt. Install one of the two
+headless backends below, then pick it at pipeline launch time.
+
+**OSMesa** — software rasterizer, works on any WSL, no GPU driver needed:
 
 ```bash
 sudo apt-get update
 sudo apt-get install -y libosmesa6 libosmesa6-dev
 ```
 
-Then in `configs/mimicgen_tasks/<task>.yaml`:
+**EGL** — GPU-accelerated; needs WSLg (Windows 11, or Windows 10 with the GUI
+preview) and, for NVIDIA GPUs, the NVIDIA WSL driver from Windows. Then:
 
-```yaml
-runtime:
-  mujoco_gl: osmesa
-  video_mujoco_gl: osmesa
+```bash
+sudo apt-get update
+sudo apt-get install -y libegl1 libegl-mesa0 libgles2-mesa
 ```
 
+Sanity-check that EGL finds a device:
+
+```bash
+uv run python -c "import mujoco; import os; os.environ['MUJOCO_GL']='egl'; mujoco.GLContext(64, 64)"
+```
+
+If that raises, fall back to OSMesa. Pick the backend at the top level —
+either as a flag:
+
+```bash
+bash scripts/run_dppo_bc_to_rl.sh --task stack_d0 --mujoco-gl osmesa
+uv run python scripts/bc_to_rl_pipeline.py --task coffee --variant D0 --mujoco-gl osmesa
+uv run python scripts/run_official_dppo_mimicgen.py finetune --task stack_d0 --mujoco-gl osmesa
+```
+
+or via the `MUJOCO_GL` env var:
+
+```bash
+MUJOCO_GL=osmesa bash scripts/run_dppo_bc_to_rl.sh --task stack_d0
+```
+
+Both beat the task spec's `runtime.mujoco_gl` / `runtime.video_mujoco_gl`.
 Software rasterization is fine for env-0 video logging (~a few ms per 512²
 frame); don't use it if you ever add visual-obs training. If you have WSLg +
-a recent NVIDIA WSL driver, `egl` works too and is faster.
+a recent NVIDIA WSL driver, `--mujoco-gl egl` works too and is faster.
 
 ## Train
 

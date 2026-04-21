@@ -20,11 +20,14 @@ Options:
   --checkpoint-dir PATH   Optional checkpoint directory to sweep.
   --group GROUP           Optional wandb group tag (default: variant suffix of
                           --task, e.g. stack_d0 -> d0). Links BC + RL runs.
+  --mujoco-gl BACKEND     MuJoCo GL backend for every stage (exports MUJOCO_GL).
+                          One of glx|egl|osmesa. Use osmesa on WSL.
   --help                  Show this help.
 
 Examples:
   scripts/run_dppo_bc_to_rl.sh --task coffee_d1
   scripts/run_dppo_bc_to_rl.sh --task square_d0 --every-n 2 --n-episodes 20
+  MUJOCO_GL=osmesa scripts/run_dppo_bc_to_rl.sh --task stack_d0     # WSL
 EOF
 }
 
@@ -33,6 +36,7 @@ EVERY_N="2"
 N_EPISODES="10"
 CHECKPOINT_DIR=""
 GROUP=""
+MUJOCO_GL_FLAG=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -56,6 +60,10 @@ while [[ $# -gt 0 ]]; do
       GROUP="$2"
       shift 2
       ;;
+    --mujoco-gl)
+      MUJOCO_GL_FLAG="$2"
+      shift 2
+      ;;
     --help)
       usage
       exit 0
@@ -67,6 +75,13 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+if [[ -n "$MUJOCO_GL_FLAG" ]]; then
+  export MUJOCO_GL="$MUJOCO_GL_FLAG"
+fi
+if [[ -n "${MUJOCO_GL:-}" ]]; then
+  echo "==> MUJOCO_GL=$MUJOCO_GL"
+fi
 
 if [[ -z "$TASK" ]]; then
   echo "--task is required" >&2

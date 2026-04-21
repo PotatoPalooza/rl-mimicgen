@@ -72,6 +72,10 @@ def parse_args() -> argparse.Namespace:
                    help="RL algorithm for the second stage. Default: dapg.")
     p.add_argument("--rl_max_iterations", type=int, default=15000,
                    help="RL learning iterations. Default: 15000 (~20 h at 2048 envs / 4.7s per iter).")
+    p.add_argument("--mujoco-gl", dest="mujoco_gl", default=None,
+                   choices=("glx", "egl", "osmesa"),
+                   help="MuJoCo GL backend (exported as MUJOCO_GL for the BC + RL "
+                        "subprocesses). Use `osmesa` on WSL.")
 
     # Shared infra.
     p.add_argument("--run_root", type=Path, default=DEFAULT_RUN_ROOT,
@@ -207,6 +211,9 @@ def _run_rl(args: argparse.Namespace, group: str, bc_checkpoint: Path) -> Option
 
 def main() -> int:
     args = parse_args()
+
+    if args.mujoco_gl:
+        os.environ["MUJOCO_GL"] = args.mujoco_gl
 
     if args.skip_bc and args.bc_output_dir is None:
         raise SystemExit("--skip_bc requires --bc_output_dir.")
