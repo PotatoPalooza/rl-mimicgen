@@ -222,6 +222,103 @@ def _merge_stage_config(base_config_path: Path, task_spec: DictConfig, stage: st
     return cfg
 
 
+def _maybe_load_json(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+
+
+def _checkpoint_path_matches(target: Path, candidate: str | None) -> bool:
+    if not candidate:
+        return False
+    return target == Path(candidate).expanduser().resolve()
+
+
+def _bc_success_rate_from_summary(summary: dict[str, Any], checkpoint_path: Path) -> float | None:
+    best_metrics = summary.get("best_metrics", {})
+    if not isinstance(best_metrics, dict):
+        return None
+    if not any(
+        (
+            _checkpoint_path_matches(checkpoint_path, summary.get("best_checkpoint")),
+            _checkpoint_path_matches(checkpoint_path, summary.get("best_checkpoint_copy")),
+            _checkpoint_path_matches(checkpoint_path, best_metrics.get("checkpoint_path")),
+        )
+    ):
+        return None
+    success_rate = best_metrics.get("success_rate")
+    if success_rate is None:
+        return None
+    return float(success_rate)
+
+
+def _bc_success_rate_from_filename(checkpoint_path: Path) -> float | None:
+    checkpoint_stem = checkpoint_path.stem
+    success_match = re.search(r"_success_(\d+(?:\.\d+)?)$", checkpoint_stem)
+    if success_match:
+        return float(success_match.group(1))
+    tagged_best_match = re.search(r"best_checkpoint_(\d+)_best$", checkpoint_stem)
+    if tagged_best_match:
+        return float(tagged_best_match.group(1)) / 100.0
+    return None
+
+
+def _candidate_bc_summary_paths(checkpoint_path: Path, log_root: Path, dataset_id: str) -> list[Path]:
+    candidates: list[Path] = []
+    local_candidates = (
+        checkpoint_path.parent / "best_checkpoint.json",
+        checkpoint_path.parent / "checkpoint_eval" / "best_checkpoint.json",
+        checkpoint_path.parent.parent / "best_checkpoint.json",
+        checkpoint_path.parent.parent / "checkpoint_eval" / "best_checkpoint.json",
+    )
+    seen: set[Path] = set()
+    for candidate in local_candidates:
+        resolved = candidate.resolve()
+        if resolved not in seen:
+            seen.add(resolved)
+            candidates.append(resolved)
+
+    summary_paths = sorted(
+        [
+            *log_root.glob(f"sweep/{dataset_id}/**/best_checkpoint.json"),
+            *log_root.glob(f"pretrain/{dataset_id}/**/best_checkpoint.json"),
+        ],
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    for candidate in summary_paths:
+        resolved = candidate.resolve()
+        if resolved not in seen:
+            seen.add(resolved)
+            candidates.append(resolved)
+    return candidates
+
+
+def _finetune_checkpoint_metadata(checkpoint_path: Path, log_root: Path, dataset_id: str) -> dict[str, Any]:
+    metadata: dict[str, Any] = {
+        "source_checkpoint": checkpoint_path.as_posix(),
+    }
+    for summary_path in _candidate_bc_summary_paths(checkpoint_path, log_root, dataset_id):
+        summary = _maybe_load_json(summary_path)
+        if summary is None:
+            continue
+        success_rate = _bc_success_rate_from_summary(summary, checkpoint_path)
+        if success_rate is None:
+            continue
+        metadata["bc_success_rate"] = success_rate
+        metadata["bc_success_source"] = summary_path.as_posix()
+        break
+    else:
+        success_rate = _bc_success_rate_from_filename(checkpoint_path)
+        if success_rate is not None:
+            metadata["bc_success_rate"] = success_rate
+            metadata["bc_success_source"] = "checkpoint_filename"
+    return metadata
+
+
 def _seed_override_from_args_or_task_spec(
     args: argparse.Namespace,
     task_spec: DictConfig,
@@ -249,6 +346,7 @@ def _snapshot_run_config(
     stage: str,
     log_root: Path,
     source_checkpoint: Path | None = None,
+    launcher_metadata: dict[str, Any] | None = None,
 ) -> tuple[Path, Path, dict[str, Any]]:
     spec = _stage_spec(stage)
     run_name = _build_run_name(stage, cfg, dataset_id)
@@ -284,6 +382,7 @@ def _snapshot_run_config(
         "artifacts_dir": (run_dir / "artifacts").as_posix(),
         "wandb_dir": (run_dir / "wandb").as_posix(),
         "source_checkpoint": source_checkpoint.as_posix() if source_checkpoint is not None else None,
+        "launcher_metadata": launcher_metadata,
     }
     (run_dir / "run_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     return run_dir, config_path, manifest
@@ -304,13 +403,20 @@ def _subprocess_env(task_spec: DictConfig, *, for_video: bool = False, run_dir: 
 
 
 def _run_dppo_with_snapshot(task_spec: DictConfig, run_dir: Path, config_path: Path) -> None:
+    run_cfg = OmegaConf.load(config_path)
+    save_video = bool(run_cfg.get("env", {}).get("save_video", False))
     command = [
         str(REPO_ROOT / ".venv" / "bin" / "python"),
         str(DPPO_ROOT / "script" / "run.py"),
         f"--config-dir={run_dir.as_posix()}",
         "--config-name=run_config",
     ]
-    subprocess.run(command, cwd=DPPO_ROOT, check=True, env=_subprocess_env(task_spec, run_dir=run_dir))
+    subprocess.run(
+        command,
+        cwd=DPPO_ROOT,
+        check=True,
+        env=_subprocess_env(task_spec, for_video=save_video, run_dir=run_dir),
+    )
 
 
 def _prepare_parser() -> argparse.ArgumentParser:
@@ -398,9 +504,13 @@ def _run_stage(args: argparse.Namespace, stage: str) -> None:
     cfg = _merge_stage_config(generated_config_path, task_spec, stage, args.dotlist)
 
     source_checkpoint = None
+    launcher_metadata = None
     if stage in {"finetune", "eval-bc", "eval-rl-init"}:
         source_checkpoint = _checkpoint_path_from_args(args, log_root, dataset_id)
         cfg.base_policy_path = source_checkpoint.as_posix()
+        if stage == "finetune":
+            launcher_metadata = _finetune_checkpoint_metadata(source_checkpoint, log_root, dataset_id)
+            cfg.launcher_metadata = OmegaConf.create(launcher_metadata)
 
     run_dir, config_path, _ = _snapshot_run_config(
         cfg=cfg,
@@ -411,6 +521,7 @@ def _run_stage(args: argparse.Namespace, stage: str) -> None:
         stage=stage,
         log_root=log_root,
         source_checkpoint=source_checkpoint,
+        launcher_metadata=launcher_metadata,
     )
     _run_dppo_with_snapshot(task_spec, run_dir, config_path)
 

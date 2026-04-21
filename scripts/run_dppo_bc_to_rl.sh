@@ -15,6 +15,7 @@ Runs the official low-dim DPPO pipeline for one MimicGen task:
 
 Options:
   --task TASK             Required task id or path to a task spec YAML.
+  --skip-pretrain         Reuse existing pretrain outputs and start at sweep.
   --every-n N             Optional sweep checkpoint stride override. Default: 2
   --n-episodes N          Optional sweep completed-episode override. Default: 40
   --checkpoint-dir PATH   Optional checkpoint directory to sweep.
@@ -22,6 +23,7 @@ Options:
 
 Examples:
   scripts/run_dppo_bc_to_rl.sh --task coffee_d1
+  scripts/run_dppo_bc_to_rl.sh --task coffee_d1 --skip-pretrain
   scripts/run_dppo_bc_to_rl.sh --task square_d0 --every-n 2 --n-episodes 40
 EOF
 }
@@ -30,12 +32,17 @@ TASK=""
 EVERY_N="2"
 N_EPISODES="40"
 CHECKPOINT_DIR=""
+SKIP_PRETRAIN=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --task)
       TASK="$2"
       shift 2
+      ;;
+    --skip-pretrain)
+      SKIP_PRETRAIN=1
+      shift
       ;;
     --every-n)
       EVERY_N="$2"
@@ -81,11 +88,15 @@ echo "==> Preparing $TASK"
   "$PYTHON_BIN" "$LAUNCHER" prepare --task "$TASK"
 )
 
-echo "==> Pretraining BC for $TASK"
-(
-  cd "$REPO_ROOT"
-  "$PYTHON_BIN" "$LAUNCHER" pretrain --task "$TASK"
-)
+if [[ "$SKIP_PRETRAIN" -eq 1 ]]; then
+  echo "==> Skipping BC pretraining for $TASK and reusing existing checkpoints"
+else
+  echo "==> Pretraining BC for $TASK"
+  (
+    cd "$REPO_ROOT"
+    "$PYTHON_BIN" "$LAUNCHER" pretrain --task "$TASK"
+  )
+fi
 
 if [[ -z "$CHECKPOINT_DIR" ]]; then
   latest_checkpoint="$(

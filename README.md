@@ -257,6 +257,13 @@ cd /home/nelly/projects/rl-mimicgen
 bash scripts/run_dppo_bc_to_rl.sh --task stack_d0
 ```
 
+If pretraining already finished and you only want to restart from the sweep stage:
+
+```bash
+cd /home/nelly/projects/rl-mimicgen
+bash scripts/run_dppo_bc_to_rl.sh --task stack_d0 --skip-pretrain
+```
+
 If you want to pin a specific BC checkpoint for eval or finetune:
 
 ```bash
