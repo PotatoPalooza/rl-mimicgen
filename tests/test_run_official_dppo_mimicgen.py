@@ -5,6 +5,8 @@ import json
 import sys
 from pathlib import Path
 
+from omegaconf import OmegaConf
+
 
 def _load_launcher_module():
     module_path = Path(__file__).resolve().parents[1] / "scripts" / "run_official_dppo_mimicgen.py"
@@ -83,3 +85,50 @@ def test_finetune_checkpoint_metadata_falls_back_to_checkpoint_filename(tmp_path
 
     assert metadata["bc_success_rate"] == 0.5104
     assert metadata["bc_success_source"] == "checkpoint_filename"
+
+
+def test_run_dppo_with_snapshot_accepts_string_env_for_pretrain(tmp_path: Path, monkeypatch) -> None:
+    config_path = tmp_path / "run_config.yaml"
+    OmegaConf.save(OmegaConf.create({"env": "Coffee_D0"}), config_path)
+
+    captured: dict[str, object] = {}
+
+    def fake_subprocess_env(task_spec, *, for_video: bool = False, run_dir: Path | None = None):
+        captured["for_video"] = for_video
+        captured["env_run_dir"] = run_dir
+        return {"WANDB_DIR": "dummy"}
+
+    def fake_run(command, cwd=None, check=None, env=None):
+        captured["command"] = command
+        captured["cwd"] = cwd
+        captured["check"] = check
+        captured["env"] = env
+
+    monkeypatch.setattr(launcher, "_subprocess_env", fake_subprocess_env)
+    monkeypatch.setattr(launcher.subprocess, "run", fake_run)
+
+    launcher._run_dppo_with_snapshot(OmegaConf.create({"runtime": {}}), tmp_path, config_path)
+
+    assert captured["for_video"] is False
+    assert captured["env_run_dir"] == tmp_path
+    assert captured["cwd"] == launcher.DPPO_ROOT
+    assert captured["check"] is True
+    assert captured["env"] == {"WANDB_DIR": "dummy"}
+
+
+def test_run_dppo_with_snapshot_reads_save_video_from_mapping_env(tmp_path: Path, monkeypatch) -> None:
+    config_path = tmp_path / "run_config.yaml"
+    OmegaConf.save(OmegaConf.create({"env": {"save_video": True}}), config_path)
+
+    captured: dict[str, object] = {}
+
+    def fake_subprocess_env(task_spec, *, for_video: bool = False, run_dir: Path | None = None):
+        captured["for_video"] = for_video
+        return {}
+
+    monkeypatch.setattr(launcher, "_subprocess_env", fake_subprocess_env)
+    monkeypatch.setattr(launcher.subprocess, "run", lambda *args, **kwargs: None)
+
+    launcher._run_dppo_with_snapshot(OmegaConf.create({"runtime": {}}), tmp_path, config_path)
+
+    assert captured["for_video"] is True

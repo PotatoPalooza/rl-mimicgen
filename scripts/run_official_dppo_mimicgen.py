@@ -404,7 +404,13 @@ def _subprocess_env(task_spec: DictConfig, *, for_video: bool = False, run_dir: 
 
 def _run_dppo_with_snapshot(task_spec: DictConfig, run_dir: Path, config_path: Path) -> None:
     run_cfg = OmegaConf.load(config_path)
-    save_video = bool(run_cfg.get("env", {}).get("save_video", False))
+    env_cfg = run_cfg.get("env", {})
+    if isinstance(env_cfg, DictConfig):
+        save_video = bool(env_cfg.get("save_video", False))
+    elif isinstance(env_cfg, dict):
+        save_video = bool(env_cfg.get("save_video", False))
+    else:
+        save_video = False
     command = [
         str(REPO_ROOT / ".venv" / "bin" / "python"),
         str(DPPO_ROOT / "script" / "run.py"),
