@@ -46,7 +46,7 @@
     "rnd_cfg": null,
     "symmetry_cfg": null,
     "dapg_lambda0": 0.1,
-    "dapg_lambda1": 0.995,
+    "dapg_lambda1": 0.998,
     "dapg_batch_size": 64,
     "demo_seq_length": 10,
     "demo_stride": null,
