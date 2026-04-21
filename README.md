@@ -77,6 +77,29 @@ uv run python scripts/run_official_dppo_mimicgen.py finetune --task stack_d0
 `finetune` picks the best checkpoint from the latest pretrain run (async
 checkpoint-eval writes `best_checkpoint.pt`).
 
+### WSL video rendering
+
+MuJoCo's default `glx`/`egl` backends need WSLg or an X server. On plain WSL2
+the offscreen render context fails and videos come out corrupt. Install
+OSMesa (software rasterizer, works everywhere) and point the task spec at it:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y libosmesa6 libosmesa6-dev
+```
+
+Then in `configs/mimicgen_tasks/<task>.yaml`:
+
+```yaml
+runtime:
+  mujoco_gl: osmesa
+  video_mujoco_gl: osmesa
+```
+
+Software rasterization is fine for env-0 video logging (~a few ms per 512²
+frame); don't use it if you ever add visual-obs training. If you have WSLg +
+a recent NVIDIA WSL driver, `egl` works too and is faster.
+
 ## Train
 
 Run the MimicGen one-task BC runner:

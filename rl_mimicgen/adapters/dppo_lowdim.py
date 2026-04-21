@@ -52,7 +52,7 @@ def _render_wandb_block(stage: str, dataset_id: str, entity: str | None, group: 
 def _ensure_local_repo_paths() -> None:
     import sys
 
-    os.environ["MUJOCO_GL"] = "glx"
+    os.environ.setdefault("MUJOCO_GL", "glx")
     for repo_name in ("mimicgen", "robomimic", "robosuite", "robosuite-task-zoo", "dppo"):
         repo_path = REPO_ROOT / "resources" / repo_name
         if repo_path.exists():
