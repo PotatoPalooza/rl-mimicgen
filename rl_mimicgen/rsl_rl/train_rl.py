@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import sys
@@ -52,6 +53,7 @@ from rl_mimicgen.rsl_rl import (
     copy_bc_weights_into_actor,
     fetch_wandb_checkpoint,
     load_bc_checkpoint,
+    reset_gmm_scale_head,
 )
 from rl_mimicgen.rsl_rl.warp_buffer_sizes import resolve_warp_buffer_sizes
 
@@ -385,10 +387,37 @@ def _build_train_cfg(args: argparse.Namespace, bc_info: BCResumeInfo) -> dict[st
     hidden_dims, activation = build_actor_hidden_dims(bc_info)
     actor["hidden_dims"] = hidden_dims
     actor["activation"] = activation
+    # Precedence for distribution_cfg: CLI --init_noise_std > JSON > BC-seeded defaults.
+    # Architectural keys (class_name, num_modes) are dropped — they're tied to the
+    # BC head. Remaining JSON keys layer onto the BC-seeded dict; keys not valid for
+    # the current head class are warned and skipped. For GMM, `init_std` drives a
+    # post-transfer scale-head reset instead (stashed on args for main() to apply).
+    json_dist_cfg = dict(actor.get("distribution_cfg", {}))
+    json_dist_cfg.pop("class_name", None)
+    if "num_modes" in json_dist_cfg:
+        print(f"[WARN] Ignoring distribution_cfg.num_modes={json_dist_cfg.pop('num_modes')} "
+              f"from JSON; tied to BC MLP output width.")
+    resolved_init_std = (
+        args.init_noise_std
+        if args.init_noise_std is not None
+        else json_dist_cfg.pop("init_std", None)
+    )
     actor["distribution_cfg"] = build_distribution_cfg_from_bc(
         bc_info,
-        gaussian_init_std=args.init_noise_std if args.init_noise_std is not None else 0.05,
+        gaussian_init_std=resolved_init_std if resolved_init_std is not None else 0.05,
     )
+    # Filter remaining JSON keys by what the current head class accepts.
+    _GMM_KEYS = {"min_std", "std_activation", "low_noise_eval", "use_tanh"}
+    _GAUSSIAN_KEYS = {"std_type"}
+    accepted = _GMM_KEYS if bc_info.is_gmm else _GAUSSIAN_KEYS
+    for k, v in list(json_dist_cfg.items()):
+        if k in accepted:
+            actor["distribution_cfg"][k] = v
+        else:
+            print(f"[WARN] distribution_cfg.{k}={v} ignored "
+                  f"(not valid for {'GMM' if bc_info.is_gmm else 'TanhGaussian'} head).")
+    # Side-channel: for GMM, apply init_std as a scale-head reset post-BC-transfer.
+    args._resolved_gmm_init_std = resolved_init_std if bc_info.is_gmm else None
 
     # Runtime fields (always CLI-driven).
     cfg["seed"] = args.seed
@@ -409,11 +438,6 @@ def _build_train_cfg(args: argparse.Namespace, bc_info: BCResumeInfo) -> dict[st
         cfg["save_interval"] = args.save_interval
     if args.difficulty_horizon is not None:
         cfg["difficulty_horizon"] = args.difficulty_horizon
-    if args.init_noise_std is not None and not bc_info.is_gmm:
-        # GMM has no state-independent std; CLI override only applies to the
-        # Tanh-Gaussian fallback used for non-GMM BC policies.
-        cfg["actor"]["distribution_cfg"]["init_std"] = args.init_noise_std
-
     # DAPG-specific: inject demo dataset info + apply CLI overrides.
     if args.dapg:
         alg = cfg["algorithm"]
@@ -480,8 +504,8 @@ def main() -> None:
     dist_cfg = train_cfg["actor"]["distribution_cfg"]
     dist_tag = dist_cfg["class_name"].rsplit(":", 1)[-1]
     noise_tag = (
-        f"num_modes={dist_cfg['num_modes']}" if bc_info.is_gmm
-        else f"init_std={dist_cfg['init_std']}"
+        f"num_modes={dist_cfg['num_modes']} min_std={dist_cfg.get('min_std')}" if bc_info.is_gmm
+        else f"init_std={dist_cfg['init_std']} std_type={dist_cfg.get('std_type')}"
     )
     print(f"[INFO] Actor: hidden_dims={train_cfg['actor']['hidden_dims']} "
           f"dist={dist_tag} {noise_tag}")
@@ -591,6 +615,13 @@ def main() -> None:
               f"skipped {len(skipped)}")
         if skipped:
             print(f"[WARN] Skipped (shape mismatch or missing): {skipped}")
+        # GMM has no state-independent std; apply init_std (if set) as a scale-head
+        # reset so the learnable scale starts near target instead of BC-learned ~0.05.
+        gmm_init = getattr(args, "_resolved_gmm_init_std", None)
+        if gmm_init is not None and bc_info.is_gmm:
+            reset_gmm_scale_head(runner.alg.actor, bc_info, float(gmm_init))
+            print(f"[INFO] GMM scale head reset: per-component init_std={gmm_init} "
+                  f"(weights zeroed, bias={math.log(math.exp(gmm_init - float(bc_info.gmm_kwargs.get('min_std', 1e-4))) - 1.0):.4f})")
         runner.alg.actor.to(device)
     else:
         print("[INFO] BC warm-start disabled (--no_warm_start); actor initialized randomly.")

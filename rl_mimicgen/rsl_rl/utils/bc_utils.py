@@ -20,6 +20,7 @@ Refuses transformer-based BC policies (``BC_Transformer*``) since RSL-RL's
 from __future__ import annotations
 
 import json
+import math
 import os
 from dataclasses import dataclass, field
 
@@ -323,6 +324,49 @@ def _copy_head(actor_mlp: torch.nn.Module, bc_sd: dict, bc_info: BCResumeInfo, a
     target[f"{final_idx}.bias"] = cat_b.clone()
     actor_mlp.load_state_dict(target)
     loaded.extend([f"head.{k}" for k in keys])
+
+
+def reset_gmm_scale_head(
+    actor_model: torch.nn.Module,
+    bc_info: BCResumeInfo,
+    target_std: float,
+) -> None:
+    """Re-initialize the GMM scale head to produce ``target_std`` per-component at init.
+
+    GMM has no state-independent std; its component scales are MLP outputs
+    ``softplus(raw) + min_std``. For exploration-noise control at RL start, we
+    zero the scale-head weights (state-independent at init) and set the scale-
+    head bias to ``log(exp(target_std - min_std) - 1)`` so ``softplus(bias) +
+    min_std == target_std``. Weights remain ``nn.Parameter``s; gradient descent
+    re-learns state-dependent scale as training proceeds.
+
+    Must be called AFTER :func:`copy_bc_weights_into_actor`, otherwise BC's
+    scale-head copy overwrites this reset.
+    """
+    if not bc_info.is_gmm:
+        raise ValueError("reset_gmm_scale_head only valid for GMM BC heads.")
+
+    num_modes = int(bc_info.gmm_kwargs.get("num_modes", 5))
+    min_std = float(bc_info.gmm_kwargs.get("min_std", 1e-4))
+    ac_dim = int(bc_info.action_dim)
+    if target_std <= min_std:
+        raise ValueError(f"target_std={target_std} must exceed min_std={min_std}.")
+
+    # Locate final Linear (head) in actor_model.mlp: last Linear in the module list.
+    final_linear: torch.nn.Linear | None = None
+    for m in actor_model.mlp:
+        if isinstance(m, torch.nn.Linear):
+            final_linear = m
+    if final_linear is None:
+        raise RuntimeError("reset_gmm_scale_head: no Linear found in actor.mlp")
+
+    # Scale slice in the stacked final-layer output: rows [n_modes*ac_dim : 2*n_modes*ac_dim].
+    s0 = num_modes * ac_dim
+    s1 = 2 * num_modes * ac_dim
+    raw = math.log(math.exp(target_std - min_std) - 1.0)
+    with torch.no_grad():
+        final_linear.weight[s0:s1, :].zero_()
+        final_linear.bias[s0:s1].fill_(raw)
 
 
 def copy_bc_weights_into_actor(

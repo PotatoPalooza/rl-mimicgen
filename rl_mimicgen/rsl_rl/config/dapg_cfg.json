@@ -18,9 +18,7 @@
     "rnn_hidden_dim": null,
     "rnn_num_layers": null,
     "distribution_cfg": {
-      "class_name": "GaussianDistribution",
-      "init_std": 0.05,
-      "std_type": "log"
+      "init_std": 0.5
     }
   },
   "critic": {
@@ -33,7 +31,7 @@
     "class_name": "rl_mimicgen.rsl_rl.algorithms:DAPG",
     "value_loss_coef": 1.0,
     "use_clipped_value_loss": true,
-    "clip_param": 0.1,
+    "clip_param": 0.2,
     "entropy_coef": 0.01,
     "num_learning_epochs": 3,
     "num_mini_batches": 4,
@@ -41,7 +39,7 @@
     "schedule": "adaptive",
     "gamma": 0.99,
     "lam": 0.95,
-    "desired_kl": 0.01,
+    "desired_kl": 0.02,
     "max_grad_norm": 1.0,
     "rnd_cfg": null,
     "symmetry_cfg": null,

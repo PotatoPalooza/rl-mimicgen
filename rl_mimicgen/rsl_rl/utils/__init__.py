@@ -10,6 +10,7 @@ from rl_mimicgen.rsl_rl.utils.bc_utils import (
     copy_rnn_weights_into_actor,
     fetch_wandb_checkpoint,
     load_bc_checkpoint,
+    reset_gmm_scale_head,
 )
 
 __all__ = [
@@ -20,4 +21,5 @@ __all__ = [
     "copy_rnn_weights_into_actor",
     "fetch_wandb_checkpoint",
     "load_bc_checkpoint",
+    "reset_gmm_scale_head",
 ]
