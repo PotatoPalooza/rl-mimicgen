@@ -24,7 +24,14 @@ from typing import Optional
 
 # Prefix match after underscore-strip; trailing chars must be a variant suffix
 # (``d<N>``/``o<N>``) or empty so ``coffee`` does not match ``CoffeePreparation_D0``.
-PER_TASK_WARP_BUFFER_SIZES: dict[str, dict[str, int]] = {}
+PER_TASK_WARP_BUFFER_SIZES: dict[str, dict[str, int]] = {
+    # ThreePieceAssembly_D2 hit "narrowphase overflow - please increase nconmax to
+    # 174 or naconmax to 44422" under DPPO finetune (n_envs=1024). Bump naconmax
+    # per-env to absorb the spike with >2x headroom regardless of whether the
+    # effective nworld is 1024 or a smaller internal split. Covers D0/D1/D2 via
+    # the prefix match.
+    "three_piece_assembly": {"naconmax_per_env": 200},
+}
 
 
 _VARIANT_SUFFIX_RE = re.compile(r"^(d\d+|o\d+)?$")

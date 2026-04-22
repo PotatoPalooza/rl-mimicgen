@@ -71,6 +71,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no_warm_start", action="store_true",
                         help="Skip copying BC RNN weights into the RL actor "
                              "(env meta and RNN config are still taken from the ckpt).")
+    parser.add_argument("--resume_checkpoint", type=str, default=None,
+                        help="Path to an RL checkpoint (.pt saved by the runner) to "
+                             "resume from. Restores actor/critic/optimizer and "
+                             "current_learning_iteration. Implies --no_warm_start. "
+                             "Still requires --bc_checkpoint/--wandb_run for env "
+                             "metadata and actor architecture.")
+    parser.add_argument("--wandb_run_id", type=str, default=None,
+                        help="W&B run id to resume logging into. Sets WANDB_RUN_ID + "
+                             "WANDB_RESUME=allow before the runner inits wandb. Use "
+                             "with --resume_checkpoint to continue the same run end-to-end.")
 
     # -- Environment --
     parser.add_argument("--num_envs", type=int, default=None,
@@ -272,6 +282,32 @@ def _install_profiling_hooks(
     runner.alg.update = timed_update
 
 
+def _install_train_metrics_hook(runner: Any) -> None:
+    """After each ``alg.update``, flush ``alg._train_metrics`` under ``Train/*``.
+
+    Metrics (kl_max, kl_mean, clip_frac, ratio_max) are computed by DAPG's
+    per-minibatch loop to diagnose off-policy drift. Adaptive LR only polices
+    *mean* KL; tails (max KL / clip fraction / ratio blowup) are what correlate
+    with SR oscillation on precision tasks. No-op for algorithms that don't
+    populate ``_train_metrics``.
+    """
+    orig_update = runner.alg.update
+    state = {"iter": int(getattr(runner, "current_learning_iteration", 0))}
+
+    def wrapped(*args: Any, **kwargs: Any) -> Any:
+        out = orig_update(*args, **kwargs)
+        metrics = getattr(runner.alg, "_train_metrics", None)
+        writer = getattr(getattr(runner, "logger", None), "writer", None)
+        if metrics and writer is not None:
+            it = state["iter"]
+            for k, v in metrics.items():
+                writer.add_scalar(f"Train/{k}", float(v), it)
+        state["iter"] += 1
+        return out
+
+    runner.alg.update = wrapped
+
+
 def _install_difficulty_curriculum(vec_env: Any, runner: Any, horizon: int | None) -> None:
     """Ramp randomization difficulty from 0 -> 1 over ``horizon`` iterations.
 
@@ -432,6 +468,11 @@ def main() -> None:
         os.environ["WANDB_RUN_GROUP"] = args.wandb_group
         print(f"[INFO] W&B group: {args.wandb_group}")
 
+    if args.wandb_run_id and args.logger == "wandb":
+        os.environ["WANDB_RUN_ID"] = args.wandb_run_id
+        os.environ.setdefault("WANDB_RESUME", "allow")
+        print(f"[INFO] W&B resume: id={args.wandb_run_id} mode={os.environ['WANDB_RESUME']}")
+
     train_cfg = _build_train_cfg(args, bc_info)
     args.num_envs = int(train_cfg.get("num_envs", 4096))
     cfg_path_used = args.dapg_cfg if args.dapg else args.ppo_cfg
@@ -542,7 +583,9 @@ def main() -> None:
 
     runner = OnPolicyRunner(vec_env, train_cfg, log_dir=log_dir, device=args.device)
 
-    if not args.no_warm_start:
+    if args.resume_checkpoint:
+        print("[INFO] --resume_checkpoint given; skipping BC warm-start.")
+    elif not args.no_warm_start:
         loaded, skipped = copy_bc_weights_into_actor(runner.alg.actor, bc_info)
         print(f"[INFO] BC warm-start: copied {len(loaded)} params (RNN + MLP + head), "
               f"skipped {len(skipped)}")
@@ -552,6 +595,12 @@ def main() -> None:
     else:
         print("[INFO] BC warm-start disabled (--no_warm_start); actor initialized randomly.")
 
+    if args.resume_checkpoint:
+        resume_path = os.path.abspath(args.resume_checkpoint)
+        runner.load(resume_path)
+        print(f"[INFO] Resumed from {resume_path} at iter {runner.current_learning_iteration}")
+
+    _install_train_metrics_hook(runner)
     _install_difficulty_curriculum(vec_env, runner, train_cfg.get("difficulty_horizon"))
 
     print(f"[INFO] Starting {'DAPG' if args.dapg else 'PPO'}: "

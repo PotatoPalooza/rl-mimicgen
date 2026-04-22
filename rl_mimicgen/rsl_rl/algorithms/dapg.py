@@ -128,6 +128,15 @@ class DAPG(PPO):
         mean_demo_loss = 0.0
         mean_demo_weight = 0.0
 
+        # Off-policy drift diagnostics (exposed via self._train_metrics for the
+        # runner-level hook in train_rl.py to log under Train/*). Track tails,
+        # not means — adaptive LR already constrains mean KL.
+        kl_max_all = 0.0
+        kl_mean_sum = 0.0
+        clip_frac_sum = 0.0
+        ratio_max_all = 0.0
+        metric_count = 0
+
         if self.actor.is_recurrent or self.critic.is_recurrent:
             generator = self.storage.recurrent_mini_batch_generator(
                 self.num_mini_batches, self.num_learning_epochs
@@ -206,6 +215,17 @@ class DAPG(PPO):
                 ratio, 1.0 - self.clip_param, 1.0 + self.clip_param
             )
             surrogate_loss = torch.max(surrogate, surrogate_clipped).mean()
+
+            with torch.no_grad():
+                kl_mb = self.actor.get_kl_divergence(
+                    batch.old_distribution_params, distribution_params
+                )
+                kl_max_all = max(kl_max_all, float(kl_mb.max().item()))
+                kl_mean_sum += float(kl_mb.mean().item())
+                ratio_dev = (ratio - 1.0).abs()
+                clip_frac_sum += float((ratio_dev > self.clip_param).float().mean().item())
+                ratio_max_all = max(ratio_max_all, float(ratio.max().item()))
+                metric_count += 1
 
             if self.use_clipped_value_loss:
                 value_clipped = batch.values + (values - batch.values).clamp(-self.clip_param, self.clip_param)
@@ -293,6 +313,14 @@ class DAPG(PPO):
 
         self.storage.clear()
         self._update_count += 1
+
+        denom = max(metric_count, 1)
+        self._train_metrics = {
+            "kl_max": kl_max_all,
+            "kl_mean": kl_mean_sum / denom,
+            "clip_frac": clip_frac_sum / denom,
+            "ratio_max": ratio_max_all,
+        }
 
         loss_dict = {
             "value": mean_value_loss,
