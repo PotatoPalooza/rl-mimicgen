@@ -37,7 +37,6 @@ from typing import Optional
 
 import torch
 
-
 WORKSPACE_DIR = Path(__file__).resolve().parents[1]
 DEFAULT_RUN_ROOT = WORKSPACE_DIR / "runs"
 
@@ -70,8 +69,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--variant", required=True, help="Dataset variant (D0, D1, D2, O1, ...).")
     p.add_argument("--algo", default="dapg", choices=("ppo", "dapg"),
                    help="RL algorithm for the second stage. Default: dapg.")
-    p.add_argument("--rl_max_iterations", type=int, default=15000,
-                   help="RL learning iterations. Default: 15000 (~20 h at 2048 envs / 4.7s per iter).")
+    p.add_argument("--rl_max_iterations", type=int, default=5000,
+                   help="RL learning iterations. Default: 5000 (~4 h at 2048 envs / 4.7s per iter).")
     p.add_argument("--mujoco-gl", dest="mujoco_gl", default=None,
                    choices=("glx", "egl", "osmesa"),
                    help="MuJoCo GL backend (exported as MUJOCO_GL for the BC + RL "

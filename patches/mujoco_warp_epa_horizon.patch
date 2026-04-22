@@ -1,0 +1,19 @@
+Bump EPA horizon 24 -> 96 for CoffeePreparation's 32-hull shapenet mug.
+
+Upstream's default blows horizon on rotated sub-geoms (D1) -> bogus contact
+normals -> mug launches at reset. Arrays are (naccdmax, MJ_MAX_EPAHORIZON)
+int32; 4x growth is tens of MB at 1024 envs.
+
+--- a/mujoco_warp/_src/types.py
++++ b/mujoco_warp/_src/types.py
+@@ -25,8 +25,8 @@
+ MJ_MAXIMP = mujoco.mjMAXIMP  # maximum constraint impedance
+ MJ_MAXCONPAIR = mujoco.mjMAXCONPAIR
+ MJ_MINMU = mujoco.mjMINMU  # minimum friction
+-# maximum size (by number of edges) of an horizon in EPA algorithm
+-MJ_MAX_EPAHORIZON = 24
++# PATCH 24 -> 96: CoffeePreparation 32-hull mug blew horizon -> bogus contact normals -> jitter.
++MJ_MAX_EPAHORIZON = 96
+ # maximum average number of trianglarfaces EPA can insert at each iteration
+ MJ_MAX_EPAFACES = 5
+

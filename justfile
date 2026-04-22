@@ -1,6 +1,7 @@
 bootstrap:
     gitman install
     uv sync
+    uv run python scripts/apply_vendor_patches.py
 
 bootstrap-task-zoo:
     uv pip install -e ./robosuite-task-zoo --no-deps
@@ -11,6 +12,7 @@ lock:
 
 sync:
     uv sync
+    uv run python scripts/apply_vendor_patches.py
 
 sync-task-zoo:
     uv pip install -e ./robosuite-task-zoo --no-deps
