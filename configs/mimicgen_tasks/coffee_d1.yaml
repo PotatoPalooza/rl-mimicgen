@@ -48,10 +48,10 @@ finetune:
       batch_size: 50000
       logprob_batch_size: 51200
       render:
-        # Record env 0 every 25 iters. CPU-MjData fast path is ~0.4ms/frame,
+        # Record env 0 every 10 iters. CPU-MjData fast path is ~0.4ms/frame,
         # so this is effectively free on training throughput.
         num: 1
-        freq: 25
+        freq: 10
 
 eval_bc:
   config:

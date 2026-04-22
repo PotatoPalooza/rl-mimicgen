@@ -446,7 +446,7 @@ train:
   val_freq: 10
   force_train: True  # skip upstream's deterministic val-eval rollout; redundant at warp n_envs
   render:
-    freq: 25
+    freq: 10
     num: 1
   reward_scale_running: True
   reward_scale_const: 1.0
