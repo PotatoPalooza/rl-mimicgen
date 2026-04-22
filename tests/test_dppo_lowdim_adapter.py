@@ -43,3 +43,4 @@ def test_generated_configs_use_spec_env_name(tmp_path: Path) -> None:
     assert "env_name: HammerCleanup_D1" in finetune_text
     assert "env_name: HammerCleanup_D1" in eval_bc_text
     assert "env_name: HammerCleanup_D1" in eval_rl_text
+    assert "multiprocessing_context: spawn" in finetune_text

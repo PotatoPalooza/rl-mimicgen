@@ -205,6 +205,7 @@ def _render_generated_config_header() -> str:
 def _render_lowdim_env_block(spec: MimicGenLowDimSpec, *, normalization_ref: str) -> str:
     return f"""env:
   n_envs: 50
+  multiprocessing_context: spawn
   name: ${{env_name}}
   success_info_key: success
   best_reward_threshold_for_success: 1
