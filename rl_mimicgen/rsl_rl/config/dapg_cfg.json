@@ -2,7 +2,7 @@
   "num_envs": 2048,
   "num_steps_per_env": 40,
   "physics_timestep": 0.002,
-  "max_iterations": 10000,
+  "max_iterations": 5000,
   "save_interval": 500,
   "difficulty_horizon": 1000,
   "obs_groups": {
@@ -62,8 +62,5 @@
     "fps": 20,
     "camera": null
   },
-  "env_kwargs": {
-    "tipover_prob": 0.1,
-    "fall_off_termination": true
-  }
+  "env_kwargs": {}
 }

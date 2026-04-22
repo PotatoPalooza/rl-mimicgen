@@ -55,7 +55,6 @@
     "camera": null
   },
   "env_kwargs": {
-    "tipover_prob": 0.1,
-    "fall_off_termination": true
+    "tipover_prob": 0.1
   }
 }

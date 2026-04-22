@@ -31,7 +31,7 @@ def main() -> None:
 
     env_meta = bc_info.env_meta
     env_meta.setdefault("env_kwargs", {}).update(
-        {"extra_randomization": True, "tipover_prob": 0.0, "fall_off_termination": True}
+        {"extra_randomization": True, "tipover_prob": 0.0}
     )
     caps = resolve_warp_buffer_sizes(env_meta.get("env_name")) or {}
     if caps:
