@@ -4,7 +4,6 @@
   "physics_timestep": 0.002,
   "max_iterations": 5000,
   "save_interval": 500,
-  "difficulty_horizon": 1000,
   "obs_groups": {
     "actor": ["policy"],
     "critic": ["policy"]

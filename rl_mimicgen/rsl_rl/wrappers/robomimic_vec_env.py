@@ -129,9 +129,6 @@ class RobomimicVecEnv(VecEnv):
         # Sticky set: cause keys emit 0 when not firing so dashboards don't drop series.
         self._early_term_causes_seen: set[str] = set()
 
-        # None => no curriculum hook active; skip logging a scalar.
-        self._current_difficulty: float | None = None
-
         # Populated lazily from _get_partial_task_metrics if the env exposes it.
         self._subtask_keys: list[str] | None = None
         self._subtask_ever: dict[str, torch.Tensor] = {}
@@ -292,9 +289,6 @@ class RobomimicVecEnv(VecEnv):
                 n = self._term_cause_counts.get(cause, 0)
                 extras["log"][f"Episode_Termination/{cause}"] = n / n_done
 
-            if self._current_difficulty is not None:
-                extras["log"]["Curriculum/difficulty"] = self._current_difficulty
-
             self._success_count = 0
             self._term_success_count = 0
             self._term_nan_count = 0
@@ -321,19 +315,6 @@ class RobomimicVecEnv(VecEnv):
             torch.manual_seed(seed)
             np.random.seed(seed)
         return seed
-
-    def set_difficulty(self, difficulty: float) -> float:
-        """Push a new curriculum difficulty into the underlying env.
-
-        Returns the clipped value actually applied (so callers can log it).
-        No-op on envs that don't implement ``set_difficulty``.
-        """
-        fn = getattr(self.env.env, "set_difficulty", None)
-        d = float(np.clip(difficulty, 0.0, 1.0))
-        if callable(fn):
-            fn(d)
-        self._current_difficulty = d
-        return d
 
     def close(self) -> None:
         pass

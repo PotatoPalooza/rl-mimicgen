@@ -120,12 +120,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max_iterations", type=int, default=None,
                         help="Total PPO iterations. Overrides ppo_cfg.json if set "
                              "(default there: 30000).")
-    parser.add_argument("--difficulty_horizon", type=int, default=None,
-                        help="Iterations to reach difficulty=1.0 from a start of "
-                             "0.0. Overrides ppo_cfg.json / dapg_cfg.json "
-                             "(difficulty_horizon). =0: difficulty fixed at 1.0. "
-                             "Unset/null: no curriculum (env uses env_kwargs.difficulty, "
-                             "default 0 = no randomization).")
     parser.add_argument("--num_steps_per_env", type=int, default=None,
                         help="Rollout steps per env per PPO update. Overrides the value "
                              "in ppo_cfg.json if set (default there: 24).")
@@ -310,44 +304,6 @@ def _install_train_metrics_hook(runner: Any) -> None:
     runner.alg.update = wrapped
 
 
-def _install_difficulty_curriculum(vec_env: Any, runner: Any, horizon: int | None) -> None:
-    """Ramp randomization difficulty from 0 -> 1 over ``horizon`` iterations.
-
-    Semantics: ``horizon > 0`` -> ``d = min(it / horizon, 1.0)``;
-    ``horizon == 0`` -> static 1.0; ``horizon is None`` -> no-op (env keeps
-    whatever static value was set via ``env_kwargs.difficulty``, default 0).
-
-    Hooks the call site after each ``alg.update`` so the curriculum advances
-    one step per learning iteration. The starting value is pushed before the
-    first rollout so the initial reset distribution matches ``d=0``.
-    """
-    if horizon is None:
-        return
-    horizon = int(horizon)
-    if horizon < 0:
-        raise ValueError(f"difficulty_horizon must be >= 0, got {horizon}")
-
-    def difficulty_for_iter(it: int) -> float:
-        if horizon == 0:
-            return 1.0
-        return min(float(it) / float(horizon), 1.0)
-
-    vec_env.set_difficulty(difficulty_for_iter(0))
-    print(f"[INFO] Curriculum: difficulty_horizon={horizon} "
-          f"(start={difficulty_for_iter(0):.3f}, reach 1.0 at iter {horizon})")
-
-    orig_update = runner.alg.update
-    state = {"iter": runner.current_learning_iteration}
-
-    def wrapped_update(*args: Any, **kwargs: Any) -> Any:
-        out = orig_update(*args, **kwargs)
-        state["iter"] += 1
-        vec_env.set_difficulty(difficulty_for_iter(state["iter"]))
-        return out
-
-    runner.alg.update = wrapped_update
-
-
 def _default_wandb_project(env_meta: dict, obs_modalities: dict, algo: str = "ppo") -> str:
     """Derive a default wandb project like 'coffee_low_dim_ppo' from BC metadata.
 
@@ -436,8 +392,6 @@ def _build_train_cfg(args: argparse.Namespace, bc_info: BCResumeInfo) -> dict[st
         cfg["num_envs"] = args.num_envs
     if args.save_interval is not None:
         cfg["save_interval"] = args.save_interval
-    if args.difficulty_horizon is not None:
-        cfg["difficulty_horizon"] = args.difficulty_horizon
     # DAPG-specific: inject demo dataset info + apply CLI overrides.
     if args.dapg:
         alg = cfg["algorithm"]
@@ -536,10 +490,8 @@ def main() -> None:
 
     device = torch.device(args.device)
     env_meta = bc_info.env_meta
-    # Config-driven env kwargs (e.g. extra_randomization, tipover_prob). Only coffee-family
-    # envs accept them; other robosuite envs would reject unknown kwargs.
     cfg_env_kwargs: dict = train_cfg.get("env_kwargs", {}) or {}
-    if cfg_env_kwargs and "coffee" in str(env_meta.get("env_name", "")).lower():
+    if cfg_env_kwargs:
         env_meta.setdefault("env_kwargs", {}).update(cfg_env_kwargs)
 
     # Per-task MjSimWarp buffer-size overrides. Table -> CLI override order.
@@ -632,7 +584,6 @@ def main() -> None:
         print(f"[INFO] Resumed from {resume_path} at iter {runner.current_learning_iteration}")
 
     _install_train_metrics_hook(runner)
-    _install_difficulty_curriculum(vec_env, runner, train_cfg.get("difficulty_horizon"))
 
     print(f"[INFO] Starting {'DAPG' if args.dapg else 'PPO'}: "
           f"{train_cfg['max_iterations']} iters, "
