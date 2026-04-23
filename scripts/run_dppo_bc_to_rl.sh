@@ -15,7 +15,8 @@ Runs the official low-dim DPPO pipeline for one MimicGen task:
 
 Options:
   --task TASK             Required task id or path to a task spec YAML.
-  --skip-pretrain         Reuse existing pretrain outputs and start at sweep.
+  --auto-skip-pretrain    Reuse completed pretrain outputs when present, otherwise run pretrain.
+  --skip-pretrain         Legacy alias for --auto-skip-pretrain.
   --every-n N             Optional sweep checkpoint stride override. Default: 2
   --n-episodes N          Optional sweep completed-episode override. Default: 40
   --checkpoint-dir PATH   Optional checkpoint directory to sweep.
@@ -23,7 +24,7 @@ Options:
 
 Examples:
   scripts/run_dppo_bc_to_rl.sh --task coffee_d1
-  scripts/run_dppo_bc_to_rl.sh --task coffee_d1 --skip-pretrain
+  scripts/run_dppo_bc_to_rl.sh --task coffee_d1 --auto-skip-pretrain
   scripts/run_dppo_bc_to_rl.sh --task square_d0 --every-n 2 --n-episodes 40
 EOF
 }
@@ -32,16 +33,88 @@ TASK=""
 EVERY_N="2"
 N_EPISODES="40"
 CHECKPOINT_DIR=""
-SKIP_PRETRAIN=0
+AUTO_SKIP_PRETRAIN=0
+
+find_completed_pretrain_checkpoint() {
+  local task="$1"
+  local task_name
+  task_name="$(basename "$task")"
+  task_name="${task_name%.yaml}"
+  "$PYTHON_BIN" - "$REPO_ROOT" "$task_name" <<PY
+from pathlib import Path
+import re
+import sys
+from omegaconf import OmegaConf
+
+
+repo_root = Path(sys.argv[1])
+dataset_id = sys.argv[2]
+log_root = repo_root / "logs" / "official_dppo" / "mimicgen"
+pretrain_root = log_root / "pretrain" / dataset_id
+
+
+def _run_dir_sort_token(path: Path) -> str:
+    name = path.name
+    matches = re.findall(r"(\\d{8}_\\d{6}|\\d{4}-\\d{2}-\\d{2}_\\d{2}-\\d{2}-\\d{2})", name)
+    if matches:
+        return matches[-1].replace("-", "")
+    return name
+
+
+run_dirs = sorted(
+    (path for path in pretrain_root.glob("*/*") if path.is_dir()),
+    key=_run_dir_sort_token,
+    reverse=True,
+)
+
+for run_dir in run_dirs:
+    best_checkpoint = run_dir / "best_checkpoint.pt"
+    if best_checkpoint.exists():
+        print(best_checkpoint.as_posix())
+        raise SystemExit(0)
+
+    run_config_path = run_dir / "run_config.yaml"
+    if not run_config_path.exists():
+        continue
+
+    try:
+        cfg = OmegaConf.load(run_config_path)
+    except Exception:
+        continue
+
+    train_cfg = cfg.get("train")
+    if not train_cfg:
+        continue
+
+    n_epochs = train_cfg.get("n_epochs")
+    if n_epochs is None:
+        continue
+    try:
+        n_epochs_int = int(n_epochs)
+    except (TypeError, ValueError):
+        continue
+
+    final_checkpoint = run_dir / "checkpoint" / f"state_{n_epochs_int}.pt"
+    if final_checkpoint.exists():
+        print(final_checkpoint.as_posix())
+        raise SystemExit(0)
+
+print("")
+PY
+}
 
 while [[ $# -gt 0 ]]; do
-  case "$1" in
+    case "$1" in
     --task)
       TASK="$2"
       shift 2
       ;;
+    --auto-skip-pretrain)
+      AUTO_SKIP_PRETRAIN=1
+      shift
+      ;;
     --skip-pretrain)
-      SKIP_PRETRAIN=1
+      AUTO_SKIP_PRETRAIN=1
       shift
       ;;
     --every-n)
@@ -88,8 +161,17 @@ echo "==> Preparing $TASK"
   "$PYTHON_BIN" "$LAUNCHER" prepare --task "$TASK"
 )
 
-if [[ "$SKIP_PRETRAIN" -eq 1 ]]; then
-  echo "==> Skipping BC pretraining for $TASK and reusing existing checkpoints"
+if [[ "$AUTO_SKIP_PRETRAIN" -eq 1 ]]; then
+  completed_pretrain_checkpoint="$(find_completed_pretrain_checkpoint "$TASK")"
+  if [[ -n "$completed_pretrain_checkpoint" ]]; then
+    echo "==> Reusing completed BC pretrain outputs for $TASK"
+  else
+    echo "==> No completed BC pretrain found for $TASK. Running BC pretrain."
+    (
+      cd "$REPO_ROOT"
+      "$PYTHON_BIN" "$LAUNCHER" pretrain --task "$TASK"
+    )
+  fi
 else
   echo "==> Pretraining BC for $TASK"
   (
@@ -99,18 +181,29 @@ else
 fi
 
 if [[ -z "$CHECKPOINT_DIR" ]]; then
-  latest_checkpoint="$(
-    find "$REPO_ROOT/logs/official_dppo/mimicgen/pretrain/$dataset_id" -path '*/checkpoint/state_*.pt' 2>/dev/null \
-      | sort | tail -1
-  )"
+  if [[ "$AUTO_SKIP_PRETRAIN" -eq 1 ]]; then
+    latest_checkpoint="$(find_completed_pretrain_checkpoint "$TASK")"
+  else
+    latest_checkpoint="$(
+      find "$REPO_ROOT/logs/official_dppo/mimicgen/pretrain/$dataset_id" -path '*/checkpoint/state_*.pt' 2>/dev/null \
+        | sort | tail -1
+    )"
+  fi
   if [[ -z "$latest_checkpoint" ]]; then
-    echo "Failed to find a pretrain checkpoint directory for task $dataset_id." >&2
+    if [[ "$AUTO_SKIP_PRETRAIN" -eq 1 ]]; then
+      echo "Failed to find a completed pretrain checkpoint directory for task $dataset_id." >&2
+    else
+      echo "Failed to find a pretrain checkpoint directory for task $dataset_id." >&2
+    fi
     exit 1
   fi
   CHECKPOINT_DIR="$(dirname "$latest_checkpoint")"
 fi
 
 sweep_args=(sweep --task "$TASK")
+if [[ "$AUTO_SKIP_PRETRAIN" -eq 1 ]]; then
+  sweep_args+=(--auto-skip-pretrain)
+fi
 if [[ -n "$EVERY_N" ]]; then
   sweep_args+=(--every-n "$EVERY_N")
 fi

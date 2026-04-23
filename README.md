@@ -257,11 +257,11 @@ cd /home/nelly/projects/rl-mimicgen
 bash scripts/run_dppo_bc_to_rl.sh --task stack_d0
 ```
 
-If pretraining already finished and you only want to restart from the sweep stage:
+If you want automatic pretrain reuse (run pretrain only when needed):
 
 ```bash
 cd /home/nelly/projects/rl-mimicgen
-bash scripts/run_dppo_bc_to_rl.sh --task stack_d0 --skip-pretrain
+  bash scripts/run_dppo_bc_to_rl.sh --task stack_d0 --auto-skip-pretrain
 ```
 
 If you want to pin a specific BC checkpoint for eval or finetune:
@@ -369,7 +369,7 @@ Behavior:
 
 - each worker safely locks the queue file before claiming a task
 - a claimed task is rewritten from `TODO <task>` to `RUNNING <task> <worker> <timestamp>`
-- the worker runs the full pipeline via `scripts/run_dppo_bc_to_rl.sh --task <task>`
+- the worker runs the full pipeline via `scripts/run_dppo_bc_to_rl.sh --task <task> --auto-skip-pretrain`
 - on success, the entry becomes `DONE <task> <worker> <timestamp>`
 - on failure, the entry becomes `FAILED <task> <worker> <timestamp>`
 - the worker keeps running serially until no `TODO` tasks remain

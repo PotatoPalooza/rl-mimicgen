@@ -90,7 +90,7 @@ while true; do
 
   if (
     echo "[start] $(timestamp) worker=$WORKER_ID task=$task"
-    bash "$PIPELINE_SCRIPT" --task "$task"
+    bash "$PIPELINE_SCRIPT" --task "$task" --auto-skip-pretrain
     echo "[done] $(timestamp) worker=$WORKER_ID task=$task"
   ) 2>&1 | tee "$task_log"; then
     mark_task "$task" "DONE"
