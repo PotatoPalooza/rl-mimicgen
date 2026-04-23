@@ -244,6 +244,7 @@ def _render_ppo_model_block(*, base_policy_ref: str) -> str:
   clip_ploss_coef: 0.01
   clip_ploss_coef_base: 0.001
   clip_ploss_coef_rate: 3
+  final_action_clip_value: 1.0
   randn_clip_value: 3
   min_sampling_denoising_std: 0.1
   min_logprob_denoising_std: 0.1
@@ -339,6 +340,7 @@ model:
   _target_: model.diffusion.diffusion.DiffusionModel
   predict_epsilon: True
   denoised_clip_value: 1.0
+  final_action_clip_value: 1.0
   network:
     _target_: model.diffusion.mlp_diffusion.DiffusionMLP
     time_dim: 32
@@ -475,6 +477,7 @@ model:
   ft_denoising_steps: ${{ft_denoising_steps}}
   predict_epsilon: True
   denoised_clip_value: 1.0
+  final_action_clip_value: 1.0
   randn_clip_value: 3
   network_path: ${{base_policy_path}}
   {_render_diffusion_mlp_network_block()}
