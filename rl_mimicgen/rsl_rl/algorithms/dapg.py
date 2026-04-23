@@ -54,6 +54,7 @@ class DAPG(PPO):
         demo_filter_key: str | None = None,
         dapg_lambda0: float = 0.1,
         dapg_lambda1: float = 0.995,
+        dapg_weight_floor: float = 0.0,
         dapg_batch_size: int = 64,
         **kwargs: Any,
     ) -> None:
@@ -75,6 +76,7 @@ class DAPG(PPO):
         )
         self.dapg_lambda0 = float(dapg_lambda0)
         self.dapg_lambda1 = float(dapg_lambda1)
+        self.dapg_weight_floor = float(dapg_weight_floor)
         self.dapg_batch_size = int(dapg_batch_size)
         # Incremented once per call to ``update()``; exponent for w_k decay.
         self._update_count: int = 0
@@ -146,7 +148,10 @@ class DAPG(PPO):
                 self.num_mini_batches, self.num_learning_epochs
             )
 
-        w_decay = self.dapg_lambda0 * (self.dapg_lambda1 ** self._update_count)
+        w_decay = max(
+            self.dapg_weight_floor,
+            self.dapg_lambda0 * (self.dapg_lambda1 ** self._update_count),
+        )
 
         for batch in generator:
             original_batch_size = batch.observations.batch_size[0]
