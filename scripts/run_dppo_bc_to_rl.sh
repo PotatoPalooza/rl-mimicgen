@@ -16,7 +16,7 @@ Runs the official low-dim DPPO pipeline for one MimicGen task:
 Options:
   --task TASK             Required task id or path to a task spec YAML.
   --auto-skip-pretrain    Reuse completed pretrain outputs when present, otherwise run pretrain.
-  --skip-pretrain         Legacy alias for --auto-skip-pretrain.
+  --skip-pretrain         Require completed pretrain outputs and do not run BC pretrain.
   --every-n N             Optional sweep checkpoint stride override. Default: 2
   --n-episodes N          Optional sweep completed-episode override. Default: 40
   --checkpoint-dir PATH   Optional checkpoint directory to sweep.
@@ -34,6 +34,7 @@ EVERY_N="2"
 N_EPISODES="40"
 CHECKPOINT_DIR=""
 AUTO_SKIP_PRETRAIN=0
+SKIP_PRETRAIN=0
 
 find_completed_pretrain_checkpoint() {
   local task="$1"
@@ -114,7 +115,7 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --skip-pretrain)
-      AUTO_SKIP_PRETRAIN=1
+      SKIP_PRETRAIN=1
       shift
       ;;
     --every-n)
@@ -161,7 +162,16 @@ echo "==> Preparing $TASK"
   "$PYTHON_BIN" "$LAUNCHER" prepare --task "$TASK"
 )
 
-if [[ "$AUTO_SKIP_PRETRAIN" -eq 1 ]]; then
+if [[ "$SKIP_PRETRAIN" -eq 1 ]]; then
+  echo "==> Skipping BC pretrain for $TASK because --skip-pretrain was set."
+  if [[ -z "$CHECKPOINT_DIR" ]]; then
+    completed_pretrain_checkpoint="$(find_completed_pretrain_checkpoint "$TASK")"
+    if [[ -z "$completed_pretrain_checkpoint" ]]; then
+      echo "Failed to find a completed pretrain checkpoint directory for task $dataset_id while --skip-pretrain is set." >&2
+      exit 1
+    fi
+  fi
+elif [[ "$AUTO_SKIP_PRETRAIN" -eq 1 ]]; then
   completed_pretrain_checkpoint="$(find_completed_pretrain_checkpoint "$TASK")"
   if [[ -n "$completed_pretrain_checkpoint" ]]; then
     echo "==> Reusing completed BC pretrain outputs for $TASK"
@@ -181,7 +191,7 @@ else
 fi
 
 if [[ -z "$CHECKPOINT_DIR" ]]; then
-  if [[ "$AUTO_SKIP_PRETRAIN" -eq 1 ]]; then
+  if [[ "$AUTO_SKIP_PRETRAIN" -eq 1 || "$SKIP_PRETRAIN" -eq 1 ]]; then
     latest_checkpoint="$(find_completed_pretrain_checkpoint "$TASK")"
   else
     latest_checkpoint="$(
@@ -190,7 +200,9 @@ if [[ -z "$CHECKPOINT_DIR" ]]; then
     )"
   fi
   if [[ -z "$latest_checkpoint" ]]; then
-    if [[ "$AUTO_SKIP_PRETRAIN" -eq 1 ]]; then
+    if [[ "$SKIP_PRETRAIN" -eq 1 ]]; then
+      echo "Failed to find a completed pretrain checkpoint directory for task $dataset_id while --skip-pretrain is set." >&2
+    elif [[ "$AUTO_SKIP_PRETRAIN" -eq 1 ]]; then
       echo "Failed to find a completed pretrain checkpoint directory for task $dataset_id." >&2
     else
       echo "Failed to find a pretrain checkpoint directory for task $dataset_id." >&2

@@ -10,7 +10,7 @@ Starts a worker that claims TODO tasks from the batch queue and runs the pipelin
 
 Options:
   --auto-skip-pretrain    Pass --auto-skip-pretrain to run_dppo_bc_to_rl.sh.
-  --skip-pretrain         Legacy alias for --auto-skip-pretrain.
+  --skip-pretrain         Pass --skip-pretrain to run_dppo_bc_to_rl.sh.
   --no-auto-skip-pretrain Explicitly disable auto pretrain skipping for this worker.
   --help                  Show this help.
 
@@ -33,6 +33,7 @@ RUN_ID="${RUN_ID:-$(date +%Y%m%d_%H%M%S)_${WORKER_ID}}"
 LOG_ROOT="${LOG_ROOT:-$REPO_ROOT/logs/official_dppo/mimicgen/batch}"
 LOG_DIR="$LOG_ROOT/$RUN_ID"
 AUTO_SKIP_PRETRAIN=0
+SKIP_PRETRAIN=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -41,7 +42,7 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --skip-pretrain)
-      AUTO_SKIP_PRETRAIN=1
+      SKIP_PRETRAIN=1
       shift
       ;;
     --no-auto-skip-pretrain)
@@ -140,7 +141,9 @@ while true; do
 
   if (
     echo "[start] $(timestamp) worker=$WORKER_ID task=$task"
-    if [[ "$AUTO_SKIP_PRETRAIN" -eq 1 ]]; then
+    if [[ "$SKIP_PRETRAIN" -eq 1 ]]; then
+      bash "$PIPELINE_SCRIPT" --task "$task" --skip-pretrain
+    elif [[ "$AUTO_SKIP_PRETRAIN" -eq 1 ]]; then
       bash "$PIPELINE_SCRIPT" --task "$task" --auto-skip-pretrain
     else
       bash "$PIPELINE_SCRIPT" --task "$task"
