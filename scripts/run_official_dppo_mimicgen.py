@@ -191,6 +191,52 @@ def _latest_checkpoint_for_task(log_root: Path, dataset_id: str) -> Path:
     return checkpoint_paths[-1]
 
 
+def _completed_pretrain_checkpoint_from_run_dir(run_dir: Path) -> Path | None:
+    best_checkpoint = run_dir / "best_checkpoint.pt"
+    if best_checkpoint.exists():
+        return best_checkpoint
+
+    run_config_path = run_dir / "run_config.yaml"
+    if not run_config_path.exists():
+        return None
+
+    cfg = OmegaConf.load(run_config_path)
+    train_cfg = cfg.get("train", None)
+    if train_cfg is None:
+        return None
+
+    n_epochs = train_cfg.get("n_epochs", None)
+    if n_epochs is None:
+        return None
+
+    try:
+        n_epochs_int = int(n_epochs)
+    except (TypeError, ValueError):
+        return None
+
+    final_checkpoint = run_dir / "checkpoint" / f"state_{n_epochs_int}.pt"
+    if final_checkpoint.exists():
+        return final_checkpoint
+    return None
+
+
+def _latest_completed_pretrain_checkpoint(log_root: Path, dataset_id: str) -> Path:
+    run_dirs = sorted(
+        log_root.glob(f"pretrain/{dataset_id}/*/*"),
+        key=lambda path: _run_dir_sort_token(path),
+        reverse=True,
+    )
+    for run_dir in run_dirs:
+        if not run_dir.is_dir():
+            continue
+        checkpoint = _completed_pretrain_checkpoint_from_run_dir(run_dir)
+        if checkpoint is not None:
+            return checkpoint
+    raise FileNotFoundError(
+        f"No completed pretrain checkpoints found for {dataset_id} under {log_root}"
+    )
+
+
 def _latest_checkpoint_in_run_dir(run_dir: Path) -> Path:
     best_checkpoint = run_dir / "best_checkpoint.pt"
     if best_checkpoint.exists():
@@ -390,6 +436,11 @@ def _snapshot_run_config(
 
 def _subprocess_env(task_spec: DictConfig, *, for_video: bool = False, run_dir: Path | None = None) -> dict[str, str]:
     env = os.environ.copy()
+    env.setdefault("OMP_NUM_THREADS", "1")
+    env.setdefault("MKL_NUM_THREADS", "1")
+    env.setdefault("OPENBLAS_NUM_THREADS", "1")
+    env.setdefault("VECLIB_MAXIMUM_THREADS", "1")
+    env.setdefault("NUMEXPR_NUM_THREADS", "1")
     runtime_cfg = task_spec.get("runtime", {})
     backend_key = "video_mujoco_gl" if for_video else "mujoco_gl"
     mujoco_gl = runtime_cfg.get(backend_key) or runtime_cfg.get("mujoco_gl")
@@ -438,6 +489,11 @@ def _prepare_parser() -> argparse.ArgumentParser:
         if stage_name in {"finetune", "eval-bc", "eval-rl-init"}:
             stage.add_argument("--checkpoint", default=None, help="Optional checkpoint path. Defaults to the latest pretrain checkpoint for the task.")
             stage.add_argument("--run-dir", default=None, help="Optional old run directory. Uses `best_checkpoint.pt` if present, otherwise the latest checkpoint under `checkpoint/`.")
+            stage.add_argument(
+                "--auto-skip-pretrain",
+                action="store_true",
+                help="Use the latest completed pretrain checkpoint only; fail if no completed pretrain run exists.",
+            )
         stage.add_argument(
             "--set",
             dest="dotlist",
@@ -448,6 +504,11 @@ def _prepare_parser() -> argparse.ArgumentParser:
 
     sweep = subparsers.add_parser("sweep", help="Sweep saved checkpoints for a task using the configured eval mode.")
     sweep.add_argument("--task", required=True, help="Task id or path to a task spec YAML.")
+    sweep.add_argument(
+        "--auto-skip-pretrain",
+        action="store_true",
+        help="If no checkpoint-dir is set, require the latest completed pretrain run and sweep immediately.",
+    )
     sweep.add_argument("--checkpoint-dir", default=None, help="Optional checkpoint directory to sweep. Defaults to the latest pretrain run checkpoint dir.")
     sweep.add_argument(
         "--eval-mode",
@@ -512,7 +573,10 @@ def _run_stage(args: argparse.Namespace, stage: str) -> None:
     source_checkpoint = None
     launcher_metadata = None
     if stage in {"finetune", "eval-bc", "eval-rl-init"}:
-        source_checkpoint = _checkpoint_path_from_args(args, log_root, dataset_id)
+        if args.auto_skip_pretrain and getattr(args, "checkpoint", None) is None and getattr(args, "run_dir", None) is None:
+            source_checkpoint = _latest_completed_pretrain_checkpoint(log_root, dataset_id)
+        else:
+            source_checkpoint = _checkpoint_path_from_args(args, log_root, dataset_id)
         cfg.base_policy_path = source_checkpoint.as_posix()
         if stage == "finetune":
             launcher_metadata = _finetune_checkpoint_metadata(source_checkpoint, log_root, dataset_id)
@@ -553,7 +617,12 @@ def _run_sweep(args: argparse.Namespace) -> None:
     )
     cfg.seed = sweep_seed
 
-    if args.checkpoint_dir is not None:
+    if args.auto_skip_pretrain:
+        if args.checkpoint_dir is not None:
+            checkpoint_dir = _resolve_repo_path(args.checkpoint_dir)
+        else:
+            checkpoint_dir = _latest_completed_pretrain_checkpoint(log_root, dataset_id).parent
+    elif args.checkpoint_dir is not None:
         checkpoint_dir = _resolve_repo_path(args.checkpoint_dir)
     else:
         checkpoint_dir = _latest_checkpoint_for_task(log_root, dataset_id).parent

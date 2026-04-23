@@ -87,6 +87,70 @@ def test_finetune_checkpoint_metadata_falls_back_to_checkpoint_filename(tmp_path
     assert metadata["bc_success_source"] == "checkpoint_filename"
 
 
+def test_pretrain_completion_detection_prefers_best_checkpoint(tmp_path: Path) -> None:
+    run_dir = tmp_path / "pretrain" / "coffee_d0" / "coffee_d0_pre" / "run"
+    run_dir.mkdir(parents=True)
+    run_config = run_dir / "run_config.yaml"
+    OmegaConf.save(OmegaConf.create({"train": {"n_epochs": 100}}), run_config)
+
+    expected = run_dir / "best_checkpoint.pt"
+    expected.write_text("checkpoint", encoding="utf-8")
+
+    incomplete = run_dir / "checkpoint" / "state_100.pt"
+    incomplete.parent.mkdir(parents=True, exist_ok=True)
+    incomplete.write_text("checkpoint", encoding="utf-8")
+
+    assert launcher._completed_pretrain_checkpoint_from_run_dir(run_dir) == expected
+
+
+def test_pretrain_completion_detection_uses_final_epoch_checkpoint(tmp_path: Path) -> None:
+    run_dir = tmp_path / "pretrain" / "coffee_d0" / "coffee_d0_pre" / "run"
+    run_dir.mkdir(parents=True)
+    OmegaConf.save(OmegaConf.create({"train": {"n_epochs": 20}}), run_dir / "run_config.yaml")
+    completed_checkpoint = run_dir / "checkpoint" / "state_20.pt"
+    completed_checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    completed_checkpoint.write_text("checkpoint", encoding="utf-8")
+
+    assert launcher._completed_pretrain_checkpoint_from_run_dir(run_dir) == completed_checkpoint
+
+
+def test_latest_completed_pretrain_checkpoint_prefers_newest_run(tmp_path: Path) -> None:
+    dataset_id = "coffee_d0"
+    run_root = tmp_path / "logs" / "official_dppo" / "mimicgen"
+    old_run_dir = run_root / "pretrain" / dataset_id / "old_run" / "20250101_000001_s0_aaa"
+    new_run_dir = run_root / "pretrain" / dataset_id / "new_run" / "20260101_000001_s0_bbb"
+    old_run_dir.mkdir(parents=True, exist_ok=True)
+    new_run_dir.mkdir(parents=True, exist_ok=True)
+    OmegaConf.save(
+        OmegaConf.create({"train": {"n_epochs": 5}}),
+        old_run_dir / "run_config.yaml",
+    )
+    OmegaConf.save(
+        OmegaConf.create({"train": {"n_epochs": 10}}),
+        new_run_dir / "run_config.yaml",
+    )
+
+    (old_run_dir / "checkpoint" / "state_5.pt").parent.mkdir(parents=True, exist_ok=True)
+    (old_run_dir / "checkpoint" / "state_5.pt").write_text("checkpoint", encoding="utf-8")
+    (new_run_dir / "checkpoint" / "state_10.pt").parent.mkdir(parents=True, exist_ok=True)
+
+    (new_run_dir / "checkpoint" / "state_5.pt").write_text("checkpoint", encoding="utf-8")
+
+    assert (
+        launcher._latest_completed_pretrain_checkpoint(run_root, dataset_id)
+        == old_run_dir / "checkpoint" / "state_5.pt"
+    )
+
+
+def test_prepare_parser_accepts_auto_skip_pretrain_for_finetune_and_sweep() -> None:
+    parser = launcher._prepare_parser()
+    finetune_args = parser.parse_args(["finetune", "--task", "coffee_d0", "--auto-skip-pretrain"])
+    assert finetune_args.auto_skip_pretrain is True
+
+    sweep_args = parser.parse_args(["sweep", "--task", "coffee_d0", "--auto-skip-pretrain"])
+    assert sweep_args.auto_skip_pretrain is True
+
+
 def test_run_dppo_with_snapshot_accepts_string_env_for_pretrain(tmp_path: Path, monkeypatch) -> None:
     config_path = tmp_path / "run_config.yaml"
     OmegaConf.save(OmegaConf.create({"env": "Coffee_D0"}), config_path)
