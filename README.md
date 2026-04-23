@@ -365,11 +365,19 @@ cd /home/eric/projects/rl-mimicgen
 bash scripts/run_dppo_batch_worker.sh
 ```
 
+To enable automatic BC pretrain reuse in worker launches, pass:
+
+```bash
+bash scripts/run_dppo_batch_worker.sh --auto-skip-pretrain
+```
+
 Behavior:
 
 - each worker safely locks the queue file before claiming a task
 - a claimed task is rewritten from `TODO <task>` to `RUNNING <task> <worker> <timestamp>`
-- the worker runs the full pipeline via `scripts/run_dppo_bc_to_rl.sh --task <task> --auto-skip-pretrain`
+- by default the worker runs the full pipeline via `scripts/run_dppo_bc_to_rl.sh --task <task>`
+- if started with `--auto-skip-pretrain`, it runs `scripts/run_dppo_bc_to_rl.sh --task <task> --auto-skip-pretrain`
+- `--no-auto-skip-pretrain` explicitly disables the auto-skip behavior
 - on success, the entry becomes `DONE <task> <worker> <timestamp>`
 - on failure, the entry becomes `FAILED <task> <worker> <timestamp>`
 - the worker keeps running serially until no `TODO` tasks remain

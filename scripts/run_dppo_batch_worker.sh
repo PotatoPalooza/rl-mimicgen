@@ -1,6 +1,29 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+usage() {
+  cat <<'EOF'
+Usage:
+  scripts/run_dppo_batch_worker.sh [options]
+
+Starts a worker that claims TODO tasks from the batch queue and runs the pipeline.
+
+Options:
+  --auto-skip-pretrain    Pass --auto-skip-pretrain to run_dppo_bc_to_rl.sh.
+  --skip-pretrain         Legacy alias for --auto-skip-pretrain.
+  --no-auto-skip-pretrain Explicitly disable auto pretrain skipping for this worker.
+  --help                  Show this help.
+
+Environment:
+  PIPELINE_SCRIPT   Pipeline command override. Defaults scripts/run_dppo_bc_to_rl.sh.
+  TASK_FILE         Task queue file path.
+  LOCK_FILE         Queue lock file path.
+  WORKER_ID         Worker identifier.
+  RUN_ID            Output log directory suffix.
+  LOG_ROOT          Worker log root directory.
+EOF
+}
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PIPELINE_SCRIPT="$REPO_ROOT/scripts/run_dppo_bc_to_rl.sh"
 TASK_FILE="${TASK_FILE:-$REPO_ROOT/scripts/dppo_batch_tasks.txt}"
@@ -9,6 +32,33 @@ WORKER_ID="${WORKER_ID:-$(hostname)-$$}"
 RUN_ID="${RUN_ID:-$(date +%Y%m%d_%H%M%S)_${WORKER_ID}}"
 LOG_ROOT="${LOG_ROOT:-$REPO_ROOT/logs/official_dppo/mimicgen/batch}"
 LOG_DIR="$LOG_ROOT/$RUN_ID"
+AUTO_SKIP_PRETRAIN=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --auto-skip-pretrain)
+      AUTO_SKIP_PRETRAIN=1
+      shift
+      ;;
+    --skip-pretrain)
+      AUTO_SKIP_PRETRAIN=1
+      shift
+      ;;
+    --no-auto-skip-pretrain)
+      AUTO_SKIP_PRETRAIN=0
+      shift
+      ;;
+    --help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown argument: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
 
 mkdir -p "$LOG_DIR"
 touch "$TASK_FILE"
@@ -90,7 +140,11 @@ while true; do
 
   if (
     echo "[start] $(timestamp) worker=$WORKER_ID task=$task"
-    bash "$PIPELINE_SCRIPT" --task "$task" --auto-skip-pretrain
+    if [[ "$AUTO_SKIP_PRETRAIN" -eq 1 ]]; then
+      bash "$PIPELINE_SCRIPT" --task "$task" --auto-skip-pretrain
+    else
+      bash "$PIPELINE_SCRIPT" --task "$task"
+    fi
     echo "[done] $(timestamp) worker=$WORKER_ID task=$task"
   ) 2>&1 | tee "$task_log"; then
     mark_task "$task" "DONE"
