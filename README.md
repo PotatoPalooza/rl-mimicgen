@@ -387,12 +387,15 @@ bash scripts/run_dppo_batch_worker.sh --skip-pretrain
 Behavior:
 
 - each worker safely locks the queue file before claiming a task
-- a claimed task is rewritten from `TODO <task>` to `RUNNING <task> <worker> <timestamp>`
+- queue entries may optionally carry a retry counter: `TODO <task> [retry]`
+- a claimed task is rewritten from `TODO <task> [retry]` to `RUNNING <task> <worker> <timestamp> <retry>`
 - by default the worker runs the full pipeline via `scripts/run_dppo_bc_to_rl.sh --task <task>`
 - if started with `--auto-skip-pretrain`, it runs `scripts/run_dppo_bc_to_rl.sh --task <task> --auto-skip-pretrain`
 - if started with `--skip-pretrain`, it runs `scripts/run_dppo_bc_to_rl.sh --task <task> --skip-pretrain`
 - `--no-auto-skip-pretrain` explicitly disables the auto-skip behavior
-- on success, the entry becomes `DONE <task> <worker> <timestamp>`
-- on failure, the entry becomes `FAILED <task> <worker> <timestamp>`
+- on success, the entry becomes `DONE <task> <worker> <timestamp> <retry>`
+- on failure, the task is re-queued with `retry + 1` until `MAX_RETRIES` is reached
+- after the retry cap is reached, the entry becomes `FAILED <task> <worker> <timestamp> <retry>`
+- on startup, the worker recovers stale same-host `RUNNING` entries whose worker PID is no longer alive
 - the worker keeps running serially until no `TODO` tasks remain
 - each claimed task gets its own log under `logs/official_dppo/mimicgen/batch/<run_id>/`

@@ -23,6 +23,7 @@ DPPO_ROOT = REPO_ROOT / "dppo"
 DEFAULT_OUTPUT_ROOT = "runs/official_dppo_mimicgen"
 DEFAULT_LOG_ROOT = "logs/official_dppo/mimicgen"
 DEFAULT_SWEEP_EVAL_MODE = "bc"
+RUN_STATE_FILENAME = "run_state.json"
 
 
 @dataclass(frozen=True)
@@ -161,6 +162,46 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
+
+def _run_state_path(run_dir: Path) -> Path:
+    return run_dir / RUN_STATE_FILENAME
+
+
+def _read_run_state(run_dir: Path) -> dict[str, Any] | None:
+    return _maybe_load_json(_run_state_path(run_dir))
+
+
+def _write_run_state(
+    run_dir: Path,
+    *,
+    dataset_id: str,
+    stage: str,
+    status: str,
+    progress: int | None = None,
+    target_progress: int | None = None,
+    checkpoint_path: str | None = None,
+    details: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    existing = _read_run_state(run_dir) or {}
+    payload = {
+        "dataset_id": dataset_id,
+        "stage": stage,
+        "status": status,
+        "progress": progress if progress is not None else existing.get("progress"),
+        "target_progress": (
+            target_progress if target_progress is not None else existing.get("target_progress")
+        ),
+        "checkpoint_path": (
+            checkpoint_path if checkpoint_path is not None else existing.get("checkpoint_path")
+        ),
+        "created_at": existing.get("created_at") or datetime.now().isoformat(timespec="seconds"),
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+        "details": details if details is not None else existing.get("details"),
+    }
+    _write_json(_run_state_path(run_dir), payload)
+    return payload
+
+
 def _checkpoint_sort_key(path: Path) -> tuple[str, int]:
     run_dir = path.parent.parent
     run_stamp = _run_dir_sort_token(run_dir)
@@ -192,10 +233,6 @@ def _latest_checkpoint_for_task(log_root: Path, dataset_id: str) -> Path:
 
 
 def _completed_pretrain_checkpoint_from_run_dir(run_dir: Path) -> Path | None:
-    best_checkpoint = run_dir / "best_checkpoint.pt"
-    if best_checkpoint.exists():
-        return best_checkpoint
-
     run_config_path = run_dir / "run_config.yaml"
     if not run_config_path.exists():
         return None
@@ -215,9 +252,13 @@ def _completed_pretrain_checkpoint_from_run_dir(run_dir: Path) -> Path | None:
         return None
 
     final_checkpoint = run_dir / "checkpoint" / f"state_{n_epochs_int}.pt"
-    if final_checkpoint.exists():
-        return final_checkpoint
-    return None
+    if not final_checkpoint.exists():
+        return None
+
+    best_checkpoint = run_dir / "best_checkpoint.pt"
+    if best_checkpoint.exists():
+        return best_checkpoint
+    return final_checkpoint
 
 
 def _latest_completed_pretrain_checkpoint(log_root: Path, dataset_id: str) -> Path:
@@ -247,6 +288,13 @@ def _latest_checkpoint_in_run_dir(run_dir: Path) -> Path:
     raise FileNotFoundError(f"No checkpoint found under run directory: {run_dir}")
 
 
+def _latest_resume_checkpoint_in_run_dir(run_dir: Path) -> Path | None:
+    checkpoint_paths = sorted((run_dir / "checkpoint").glob("state_*.pt"), key=_checkpoint_sort_key)
+    if not checkpoint_paths:
+        return None
+    return checkpoint_paths[-1]
+
+
 def _checkpoint_path_from_args(args: argparse.Namespace, log_root: Path, dataset_id: str) -> Path:
     checkpoint = getattr(args, "checkpoint", None)
     if checkpoint:
@@ -255,6 +303,160 @@ def _checkpoint_path_from_args(args: argparse.Namespace, log_root: Path, dataset
     if run_dir:
         return _latest_checkpoint_in_run_dir(_resolve_repo_path(run_dir))
     return _latest_checkpoint_for_task(log_root, dataset_id)
+
+
+def _latest_checkpoint_progress(run_dir: Path) -> tuple[int | None, str | None]:
+    checkpoint_dir = run_dir / "checkpoint"
+    checkpoint_paths = sorted(checkpoint_dir.glob("state_*.pt"), key=_checkpoint_sort_key)
+    if not checkpoint_paths:
+        return None, None
+    latest_checkpoint = checkpoint_paths[-1]
+    try:
+        progress = int(latest_checkpoint.stem.split("_")[1])
+    except (IndexError, ValueError):
+        progress = None
+    return progress, latest_checkpoint.as_posix()
+
+
+def _target_progress_for_stage(run_dir: Path, stage: str) -> int | None:
+    config_path = run_dir / "run_config.yaml"
+    if not config_path.exists():
+        config_path = run_dir / "eval_run_config.yaml"
+    if not config_path.exists():
+        return None
+    cfg = OmegaConf.load(config_path)
+    train_cfg = cfg.get("train", None)
+    if train_cfg is None:
+        return None
+    if stage == "pretrain":
+        try:
+            return int(train_cfg.get("n_epochs"))
+        except (TypeError, ValueError):
+            return None
+    if stage == "finetune":
+        try:
+            return int(train_cfg.get("n_train_itr")) - 1
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _stage_is_complete(run_dir: Path, stage: str) -> bool:
+    if stage == "pretrain":
+        return _completed_pretrain_checkpoint_from_run_dir(run_dir) is not None
+    if stage == "finetune":
+        target_progress = _target_progress_for_stage(run_dir, stage)
+        if target_progress is None:
+            return False
+        final_checkpoint = run_dir / "checkpoint" / f"state_{target_progress}.pt"
+        return final_checkpoint.exists()
+    if stage in {"eval-bc", "eval-rl-init"}:
+        return (run_dir / "result.npz").exists()
+    if stage == "sweep":
+        return (run_dir / "best_checkpoint.json").exists()
+    return False
+
+
+def _stage_progress(run_dir: Path, stage: str) -> tuple[int | None, str | None]:
+    if stage in {"pretrain", "finetune"}:
+        return _latest_checkpoint_progress(run_dir)
+    if stage == "sweep":
+        summary = _maybe_load_json(run_dir / "best_checkpoint.json")
+        if summary is None:
+            metrics_path = run_dir / "checkpoint_metrics.json"
+            metrics = _maybe_load_json(metrics_path)
+            if isinstance(metrics, list):
+                return len(metrics), None
+            return None, None
+        return int(summary.get("num_evaluated", 0)), summary.get("best_checkpoint")
+    if stage in {"eval-bc", "eval-rl-init"} and (run_dir / "result.npz").exists():
+        return 1, None
+    return None, None
+
+
+def _stage_run_dirs(log_root: Path, dataset_id: str, log_group: str, run_name: str) -> list[Path]:
+    run_root = log_root / log_group / dataset_id / run_name
+    if not run_root.exists():
+        return []
+    return sorted((path for path in run_root.iterdir() if path.is_dir()), key=_run_dir_sort_token, reverse=True)
+
+
+def _normalize_optional_path(path_like: str | None) -> str | None:
+    if not path_like:
+        return None
+    return Path(path_like).expanduser().resolve().as_posix()
+
+
+def _manifest_matches_request(
+    manifest: dict[str, Any],
+    *,
+    source_checkpoint: Path | None = None,
+    checkpoint_dir: Path | None = None,
+    eval_mode: str | None = None,
+    seed: int | None = None,
+) -> bool:
+    if source_checkpoint is not None:
+        if _normalize_optional_path(manifest.get("source_checkpoint")) != source_checkpoint.resolve().as_posix():
+            return False
+    if checkpoint_dir is not None:
+        details = manifest.get("details") or {}
+        manifest_checkpoint_dir = details.get("checkpoint_dir", manifest.get("checkpoint_dir"))
+        if _normalize_optional_path(manifest_checkpoint_dir) != checkpoint_dir.resolve().as_posix():
+            return False
+    if eval_mode is not None:
+        details = manifest.get("details") or {}
+        manifest_eval_mode = manifest.get("eval_mode", details.get("eval_mode"))
+        if manifest_eval_mode != eval_mode:
+            return False
+    if seed is not None:
+        manifest_seed = manifest.get("seed")
+        if manifest_seed is not None and int(manifest_seed) != int(seed):
+            return False
+    return True
+
+
+def _find_stage_run(
+    *,
+    log_root: Path,
+    dataset_id: str,
+    log_group: str,
+    run_name: str,
+    stage: str,
+    source_checkpoint: Path | None = None,
+    checkpoint_dir: Path | None = None,
+    eval_mode: str | None = None,
+    seed: int | None = None,
+    completed: bool | None = None,
+) -> tuple[Path, dict[str, Any]] | None:
+    for run_dir in _stage_run_dirs(log_root, dataset_id, log_group, run_name):
+        manifest = _maybe_load_json(run_dir / "run_manifest.json")
+        if manifest is None:
+            continue
+        manifest_stage = manifest.get("stage")
+        if manifest_stage not in {stage, "sweep"}:
+            continue
+        if not _manifest_matches_request(
+            manifest,
+            source_checkpoint=source_checkpoint,
+            checkpoint_dir=checkpoint_dir,
+            eval_mode=eval_mode,
+            seed=seed,
+        ):
+            continue
+        is_complete = _stage_is_complete(run_dir, stage)
+        if completed is True and not is_complete:
+            continue
+        if completed is False and is_complete:
+            continue
+        run_state = _read_run_state(run_dir)
+        if completed is False and run_state is not None and run_state.get("status") == "completed":
+            continue
+        return run_dir, manifest
+    return None
+
+
+def _find_reusable_stage_run(**kwargs):
+    return _find_stage_run(completed=False, **kwargs)
 
 
 def _merge_stage_config(base_config_path: Path, task_spec: DictConfig, stage: str, extra_dotlist: list[str]) -> DictConfig:
@@ -393,18 +595,28 @@ def _snapshot_run_config(
     log_root: Path,
     source_checkpoint: Path | None = None,
     launcher_metadata: dict[str, Any] | None = None,
+    reuse_run_dir: Path | None = None,
+    reuse_manifest: dict[str, Any] | None = None,
+    details: dict[str, Any] | None = None,
 ) -> tuple[Path, Path, dict[str, Any]]:
     spec = _stage_spec(stage)
     run_name = _build_run_name(stage, cfg, dataset_id)
-    run_id = _make_run_id(stage, dataset_id, int(cfg.seed))
-    created_at = datetime.now().isoformat(timespec="seconds")
-    run_dir = log_root / spec.log_group / dataset_id / run_name / run_id
+    if reuse_run_dir is not None:
+        run_dir = reuse_run_dir
+        run_id = str((reuse_manifest or {}).get("run_id", run_dir.name))
+        created_at = str((reuse_manifest or {}).get("created_at", datetime.now().isoformat(timespec="seconds")))
+    else:
+        run_id = _make_run_id(stage, dataset_id, int(cfg.seed))
+        created_at = datetime.now().isoformat(timespec="seconds")
+        run_dir = log_root / spec.log_group / dataset_id / run_name / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
 
     cfg.name = run_name
     cfg.logdir = run_dir.as_posix()
     if "wandb" in cfg and cfg.wandb is not None:
         cfg.wandb.run = run_id
+        cfg.wandb.id = run_id
+        cfg.wandb.resume = "allow"
 
     config_path = run_dir / "run_config.yaml"
     OmegaConf.save(cfg, config_path)
@@ -418,6 +630,7 @@ def _snapshot_run_config(
         "stage": stage,
         "run_id": run_id,
         "run_name": run_name,
+        "seed": int(cfg.seed),
         "created_at": created_at,
         "task_spec_path": task_spec_path.as_posix(),
         "task_spec_snapshot_path": spec_snapshot_path.as_posix(),
@@ -429,9 +642,41 @@ def _snapshot_run_config(
         "wandb_dir": (run_dir / "wandb").as_posix(),
         "source_checkpoint": source_checkpoint.as_posix() if source_checkpoint is not None else None,
         "launcher_metadata": launcher_metadata,
+        "details": details,
     }
     (run_dir / "run_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    progress, checkpoint_path = _stage_progress(run_dir, stage)
+    _write_run_state(
+        run_dir,
+        dataset_id=dataset_id,
+        stage=stage,
+        status="running",
+        progress=progress,
+        target_progress=_target_progress_for_stage(run_dir, stage),
+        checkpoint_path=checkpoint_path,
+    )
     return run_dir, config_path, manifest
+
+
+def _configure_stage_resume(
+    cfg: DictConfig,
+    *,
+    stage: str,
+    reusable_run: tuple[Path, dict[str, Any]] | None,
+) -> tuple[Path | None, dict[str, Any]]:
+    stage_details: dict[str, Any] = {}
+    if reusable_run is None:
+        return None, stage_details
+    run_dir, manifest = reusable_run
+    stage_details["reused_run_dir"] = run_dir.as_posix()
+    stage_details["reused_run_id"] = str(manifest.get("run_id", run_dir.name))
+    if stage not in {"pretrain", "finetune"}:
+        return None, stage_details
+    resume_checkpoint = _latest_resume_checkpoint_in_run_dir(run_dir)
+    if resume_checkpoint is not None:
+        cfg.resume_path = resume_checkpoint.as_posix()
+        stage_details["resume_path"] = resume_checkpoint.as_posix()
+    return resume_checkpoint, stage_details
 
 
 def _subprocess_env(task_spec: DictConfig, *, for_video: bool = False, run_dir: Path | None = None) -> dict[str, str]:
@@ -582,6 +827,62 @@ def _run_stage(args: argparse.Namespace, stage: str) -> None:
             launcher_metadata = _finetune_checkpoint_metadata(source_checkpoint, log_root, dataset_id)
             cfg.launcher_metadata = OmegaConf.create(launcher_metadata)
 
+    run_name = _build_run_name(stage, cfg, dataset_id)
+    stage_details = {"auto_skip_pretrain": bool(getattr(args, "auto_skip_pretrain", False))}
+    completed_run = _find_stage_run(
+        log_root=log_root,
+        dataset_id=dataset_id,
+        log_group=stage_spec.log_group,
+        run_name=run_name,
+        stage=stage,
+        source_checkpoint=source_checkpoint,
+        seed=int(cfg.seed),
+        completed=True,
+    )
+    if completed_run is not None:
+        run_dir, _manifest = completed_run
+        progress, checkpoint_path = _stage_progress(run_dir, stage)
+        _write_run_state(
+            run_dir,
+            dataset_id=dataset_id,
+            stage=stage,
+            status="completed",
+            progress=progress,
+            target_progress=_target_progress_for_stage(run_dir, stage),
+            checkpoint_path=checkpoint_path,
+            details=stage_details,
+        )
+        print(
+            json.dumps(
+                {
+                    "dataset_id": dataset_id,
+                    "stage": stage,
+                    "status": "completed",
+                    "run_dir": run_dir.as_posix(),
+                    "checkpoint_path": checkpoint_path,
+                },
+                indent=2,
+            )
+        )
+        return
+
+    reusable_run = _find_stage_run(
+        log_root=log_root,
+        dataset_id=dataset_id,
+        log_group=stage_spec.log_group,
+        run_name=run_name,
+        stage=stage,
+        source_checkpoint=source_checkpoint,
+        seed=int(cfg.seed),
+        completed=False,
+    )
+    _resume_checkpoint, resume_details = _configure_stage_resume(
+        cfg,
+        stage=stage,
+        reusable_run=reusable_run,
+    )
+    stage_details.update(resume_details)
+
     run_dir, config_path, _ = _snapshot_run_config(
         cfg=cfg,
         task_spec=task_spec,
@@ -592,8 +893,37 @@ def _run_stage(args: argparse.Namespace, stage: str) -> None:
         log_root=log_root,
         source_checkpoint=source_checkpoint,
         launcher_metadata=launcher_metadata,
+        reuse_run_dir=reusable_run[0] if reusable_run is not None else None,
+        reuse_manifest=reusable_run[1] if reusable_run is not None else None,
+        details=stage_details,
     )
-    _run_dppo_with_snapshot(task_spec, run_dir, config_path)
+    try:
+        _run_dppo_with_snapshot(task_spec, run_dir, config_path)
+    except Exception as exc:
+        progress, checkpoint_path = _stage_progress(run_dir, stage)
+        _write_run_state(
+            run_dir,
+            dataset_id=dataset_id,
+            stage=stage,
+            status="failed",
+            progress=progress,
+            target_progress=_target_progress_for_stage(run_dir, stage),
+            checkpoint_path=checkpoint_path,
+            details={**stage_details, "error": str(exc)},
+        )
+        raise
+    progress, checkpoint_path = _stage_progress(run_dir, stage)
+    status = "completed" if _stage_is_complete(run_dir, stage) else "running"
+    _write_run_state(
+        run_dir,
+        dataset_id=dataset_id,
+        stage=stage,
+        status=status,
+        progress=progress,
+        target_progress=_target_progress_for_stage(run_dir, stage),
+        checkpoint_path=checkpoint_path,
+        details=stage_details,
+    )
 
 
 def _run_sweep(args: argparse.Namespace) -> None:
@@ -628,10 +958,72 @@ def _run_sweep(args: argparse.Namespace) -> None:
         checkpoint_dir = _latest_checkpoint_for_task(log_root, dataset_id).parent
 
     run_name = _build_run_name(sweep_stage, cfg, dataset_id)
-    run_id = _make_run_id("sweep", dataset_id, int(cfg.seed), eval_mode=eval_mode)
-    created_at = datetime.now().isoformat(timespec="seconds")
-    run_dir = log_root / sweep_stage_spec.log_group / dataset_id / run_name / run_id
-    run_dir.mkdir(parents=True, exist_ok=True)
+    sweep_details = {"eval_mode": eval_mode, "checkpoint_dir": checkpoint_dir.as_posix()}
+
+    completed_run = _find_stage_run(
+        log_root=log_root,
+        dataset_id=dataset_id,
+        log_group=sweep_stage_spec.log_group,
+        run_name=run_name,
+        stage="sweep",
+        checkpoint_dir=checkpoint_dir,
+        eval_mode=eval_mode,
+        seed=int(cfg.seed),
+        completed=True,
+    )
+    if completed_run is not None:
+        run_dir, _manifest = completed_run
+        best_summary_path = run_dir / "best_checkpoint.json"
+        best_summary = json.loads(best_summary_path.read_text(encoding="utf-8")) if best_summary_path.exists() else {}
+        progress, checkpoint_path = _stage_progress(run_dir, "sweep")
+        _write_run_state(
+            run_dir,
+            dataset_id=dataset_id,
+            stage="sweep",
+            status="completed",
+            progress=progress,
+            checkpoint_path=checkpoint_path,
+            details=sweep_details,
+        )
+        print(
+            json.dumps(
+                {
+                    "dataset_id": dataset_id,
+                    "stage": "sweep",
+                    "eval_mode": eval_mode,
+                    "seed": sweep_seed,
+                    "status": "completed",
+                    "run_dir": run_dir.as_posix(),
+                    "run_manifest_path": (run_dir / "run_manifest.json").as_posix(),
+                    "best_checkpoint": best_summary.get("best_checkpoint"),
+                    "best_checkpoint_copy": best_summary.get("best_checkpoint_copy"),
+                    "best_checkpoint_summary_path": best_summary_path.as_posix(),
+                },
+                indent=2,
+            )
+        )
+        return
+
+    reusable = _find_stage_run(
+        log_root=log_root,
+        dataset_id=dataset_id,
+        log_group=sweep_stage_spec.log_group,
+        run_name=run_name,
+        stage="sweep",
+        checkpoint_dir=checkpoint_dir,
+        eval_mode=eval_mode,
+        seed=int(cfg.seed),
+        completed=False,
+    )
+    if reusable is not None:
+        run_dir, existing_manifest = reusable
+        run_id = str(existing_manifest.get("run_id", run_dir.name))
+        created_at = str(existing_manifest.get("created_at", datetime.now().isoformat(timespec="seconds")))
+    else:
+        run_id = _make_run_id("sweep", dataset_id, int(cfg.seed), eval_mode=eval_mode)
+        created_at = datetime.now().isoformat(timespec="seconds")
+        run_dir = log_root / sweep_stage_spec.log_group / dataset_id / run_name / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
     cfg.logdir = run_dir.as_posix()
 
     eval_config_path = run_dir / "eval_run_config.yaml"
@@ -656,8 +1048,19 @@ def _run_sweep(args: argparse.Namespace) -> None:
         "artifacts_dir": run_dir.as_posix(),
         "wandb_dir": (run_dir / "wandb").as_posix(),
         "checkpoint_dir": checkpoint_dir.as_posix(),
+        "details": sweep_details,
     }
     (run_dir / "run_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    progress, checkpoint_path = _stage_progress(run_dir, "sweep")
+    _write_run_state(
+        run_dir,
+        dataset_id=dataset_id,
+        stage="sweep",
+        status="running",
+        progress=progress,
+        checkpoint_path=checkpoint_path,
+        details=sweep_details,
+    )
 
     command = [
         str(REPO_ROOT / ".venv" / "bin" / "python"),
@@ -700,14 +1103,41 @@ def _run_sweep(args: argparse.Namespace) -> None:
     if sweep_cfg.get("copy_best_to"):
         command.extend(["--copy-best-to", str(Path(run_dir) / str(sweep_cfg.copy_best_to))])
 
-    subprocess.run(
-        command,
-        cwd=REPO_ROOT,
-        check=True,
-        env=_subprocess_env(task_spec, for_video=str(sweep_cfg.get("video_checkpoints", "none")) != "none", run_dir=run_dir),
-    )
+    try:
+        subprocess.run(
+            command,
+            cwd=REPO_ROOT,
+            check=True,
+            env=_subprocess_env(task_spec, for_video=str(sweep_cfg.get("video_checkpoints", "none")) != "none", run_dir=run_dir),
+        )
+    except Exception as exc:
+        progress, checkpoint_path = _stage_progress(run_dir, "sweep")
+        _write_run_state(
+            run_dir,
+            dataset_id=dataset_id,
+            stage="sweep",
+            status="failed",
+            progress=progress,
+            checkpoint_path=checkpoint_path,
+            details={
+                "eval_mode": eval_mode,
+                "checkpoint_dir": checkpoint_dir.as_posix(),
+                "error": str(exc),
+            },
+        )
+        raise
     best_summary_path = run_dir / "best_checkpoint.json"
     best_summary = json.loads(best_summary_path.read_text(encoding="utf-8")) if best_summary_path.exists() else {}
+    progress, checkpoint_path = _stage_progress(run_dir, "sweep")
+    _write_run_state(
+        run_dir,
+        dataset_id=dataset_id,
+        stage="sweep",
+        status="completed" if _stage_is_complete(run_dir, "sweep") else "running",
+        progress=progress,
+        checkpoint_path=checkpoint_path,
+        details=sweep_details,
+    )
     print(
         json.dumps(
             {

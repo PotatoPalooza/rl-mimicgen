@@ -103,6 +103,17 @@ def test_pretrain_completion_detection_prefers_best_checkpoint(tmp_path: Path) -
     assert launcher._completed_pretrain_checkpoint_from_run_dir(run_dir) == expected
 
 
+def test_pretrain_completion_detection_requires_final_epoch_checkpoint(tmp_path: Path) -> None:
+    run_dir = tmp_path / "pretrain" / "coffee_d0" / "coffee_d0_pre" / "run"
+    run_dir.mkdir(parents=True)
+    OmegaConf.save(OmegaConf.create({"train": {"n_epochs": 20}}), run_dir / "run_config.yaml")
+    (run_dir / "best_checkpoint.pt").write_text("checkpoint", encoding="utf-8")
+    (run_dir / "checkpoint" / "state_10.pt").parent.mkdir(parents=True, exist_ok=True)
+    (run_dir / "checkpoint" / "state_10.pt").write_text("checkpoint", encoding="utf-8")
+
+    assert launcher._completed_pretrain_checkpoint_from_run_dir(run_dir) is None
+
+
 def test_pretrain_completion_detection_uses_final_epoch_checkpoint(tmp_path: Path) -> None:
     run_dir = tmp_path / "pretrain" / "coffee_d0" / "coffee_d0_pre" / "run"
     run_dir.mkdir(parents=True)
@@ -196,3 +207,130 @@ def test_run_dppo_with_snapshot_reads_save_video_from_mapping_env(tmp_path: Path
     launcher._run_dppo_with_snapshot(OmegaConf.create({"runtime": {}}), tmp_path, config_path)
 
     assert captured["for_video"] is True
+
+
+def test_find_reusable_stage_run_prefers_latest_incomplete_sweep(tmp_path: Path) -> None:
+    log_root = tmp_path / "logs"
+    dataset_id = "coffee_d0"
+    run_name = "coffee_d0_sweep_bc"
+    completed_run = log_root / "sweep" / dataset_id / run_name / "20260423_000001_s42_old"
+    resumable_run = log_root / "sweep" / dataset_id / run_name / "20260423_000002_s42_new"
+    completed_run.mkdir(parents=True)
+    resumable_run.mkdir(parents=True)
+
+    (completed_run / "run_manifest.json").write_text(
+        json.dumps({"stage": "sweep", "run_id": completed_run.name, "created_at": "2026-04-23T00:00:01"}),
+        encoding="utf-8",
+    )
+    (completed_run / "best_checkpoint.json").write_text(json.dumps({"num_evaluated": 4}), encoding="utf-8")
+
+    (resumable_run / "run_manifest.json").write_text(
+        json.dumps({"stage": "sweep", "run_id": resumable_run.name, "created_at": "2026-04-23T00:00:02"}),
+        encoding="utf-8",
+    )
+    (resumable_run / "run_state.json").write_text(
+        json.dumps({"stage": "sweep", "status": "failed"}),
+        encoding="utf-8",
+    )
+
+    reusable = launcher._find_reusable_stage_run(
+        log_root=log_root,
+        dataset_id=dataset_id,
+        log_group="sweep",
+        run_name=run_name,
+        stage="sweep",
+    )
+
+    assert reusable is not None
+    run_dir, manifest = reusable
+    assert run_dir == resumable_run
+    assert manifest["run_id"] == resumable_run.name
+
+
+def test_snapshot_run_config_writes_running_run_state(tmp_path: Path) -> None:
+    generated_config_path = tmp_path / "generated.yaml"
+    generated_config_path.write_text("train:\n  n_epochs: 12\n", encoding="utf-8")
+    task_spec_path = tmp_path / "task.yaml"
+    task_spec_path.write_text("dataset:\n  path: coffee_d0.hdf5\n", encoding="utf-8")
+
+    cfg = OmegaConf.create(
+        {
+            "seed": 42,
+            "horizon_steps": 4,
+            "denoising_steps": 20,
+            "train": {"n_epochs": 12},
+            "wandb": None,
+        }
+    )
+    task_spec = OmegaConf.create({"dataset": {"path": "coffee_d0.hdf5"}})
+
+    run_dir, _config_path, _manifest = launcher._snapshot_run_config(
+        cfg=cfg,
+        task_spec=task_spec,
+        task_spec_path=task_spec_path,
+        generated_config_path=generated_config_path,
+        dataset_id="coffee_d0",
+        stage="pretrain",
+        log_root=tmp_path / "logs",
+    )
+
+    run_state = json.loads((run_dir / "run_state.json").read_text(encoding="utf-8"))
+    assert run_state["stage"] == "pretrain"
+    assert run_state["status"] == "running"
+    assert run_state["target_progress"] == 12
+
+
+def test_snapshot_run_config_sets_stable_wandb_resume_fields(tmp_path: Path) -> None:
+    generated_config_path = tmp_path / "generated.yaml"
+    generated_config_path.write_text("train:\n  n_epochs: 12\n", encoding="utf-8")
+    task_spec_path = tmp_path / "task.yaml"
+    task_spec_path.write_text("dataset:\n  path: coffee_d0.hdf5\n", encoding="utf-8")
+
+    cfg = OmegaConf.create(
+        {
+            "seed": 7,
+            "horizon_steps": 4,
+            "denoising_steps": 20,
+            "train": {"n_epochs": 12},
+            "wandb": {"entity": "entity", "project": "project", "run": "placeholder"},
+        }
+    )
+    task_spec = OmegaConf.create({"dataset": {"path": "coffee_d0.hdf5"}})
+
+    run_dir, config_path, manifest = launcher._snapshot_run_config(
+        cfg=cfg,
+        task_spec=task_spec,
+        task_spec_path=task_spec_path,
+        generated_config_path=generated_config_path,
+        dataset_id="coffee_d0",
+        stage="pretrain",
+        log_root=tmp_path / "logs",
+    )
+
+    saved_cfg = OmegaConf.load(config_path)
+    assert saved_cfg.wandb.run == manifest["run_id"]
+    assert saved_cfg.wandb.id == manifest["run_id"]
+    assert saved_cfg.wandb.resume == "allow"
+    assert saved_cfg.logdir == run_dir.as_posix()
+
+
+def test_configure_stage_resume_prefers_latest_state_checkpoint(tmp_path: Path) -> None:
+    run_dir = tmp_path / "pretrain" / "coffee_d0" / "run" / "20260423_000001_s42_abc"
+    checkpoint_dir = run_dir / "checkpoint"
+    checkpoint_dir.mkdir(parents=True)
+    (run_dir / "best_checkpoint.pt").write_text("best", encoding="utf-8")
+    (checkpoint_dir / "state_10.pt").write_text("10", encoding="utf-8")
+    (checkpoint_dir / "state_15.pt").write_text("15", encoding="utf-8")
+    cfg = OmegaConf.create({})
+
+    resume_checkpoint, details = launcher._configure_stage_resume(
+        cfg,
+        stage="finetune",
+        reusable_run=(run_dir, {"run_id": run_dir.name}),
+    )
+
+    assert resume_checkpoint == checkpoint_dir / "state_15.pt"
+    assert cfg.resume_path == (checkpoint_dir / "state_15.pt").as_posix()
+    assert details["reused_run_dir"] == run_dir.as_posix()
+    assert details["reused_run_id"] == run_dir.name
+    assert details["resume_path"] == (checkpoint_dir / "state_15.pt").as_posix()
