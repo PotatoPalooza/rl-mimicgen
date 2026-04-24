@@ -1,0 +1,157 @@
+dataset_id: three_piece_assembly_d2_success
+seed: 42
+
+dataset:
+  path: runs/datasets/core/three_piece_assembly_d2.hdf5
+
+materialize:
+  output_root: runs/official_dppo_mimicgen
+  val_split: 0.0
+  split_seed: 0
+
+logging:
+  root: logs/official_dppo/mimicgen
+
+runtime:
+  mujoco_gl: glx
+  video_mujoco_gl: osmesa
+
+wandb:
+  entity: null
+
+# Success-oriented profile for the current three_piece_assembly_d2 failure case.
+#
+# Intent:
+# - improve BC initialization quality instead of only shortening RL
+# - give the diffusion MLP enough temporal context to compete with robomimic's RNN BC
+# - keep the default DPPO actor capacity and denoising budget rather than the smaller fast profile
+# - make RL conservative enough to avoid destroying the initializer early
+#
+# This is not a pure speed config. Because cond_steps changes from the default, it
+# needs fresh pretraining and a new sweep before finetuning.
+pretrain:
+  config:
+    denoising_steps: 20
+    horizon_steps: 4
+    cond_steps: 8
+    train:
+      n_epochs: 1500
+      batch_size: 2048
+      learning_rate: 0.0002
+      val_freq: 50
+      save_model_freq: 50
+      use_bf16: true
+      use_compile: true
+      lr_scheduler:
+        first_cycle_steps: 1500
+        warmup_steps: 100
+        min_lr: 0.00002
+    model:
+      network:
+        time_dim: 32
+        mlp_dims: [1024, 1024, 1024]
+        cond_mlp_dims: [512, 128]
+        residual_style: true
+
+finetune:
+  config:
+    denoising_steps: 20
+    ft_denoising_steps: 10
+    cond_steps: 8
+    horizon_steps: 4
+    act_steps: 4
+    env:
+      n_envs: 50
+      wrappers:
+        robomimic_lowdim:
+          terminate_on_success: false
+    train:
+      n_train_itr: 151
+      n_steps: 300
+      actor_lr: 0.00003
+      critic_lr: 0.0005
+      batch_size: 3000
+      logprob_batch_size: 10000
+      update_epochs: 3
+      save_model_freq: 25
+      val_freq: 10
+      render:
+        freq: 25
+        num: 0
+      actor_lr_scheduler:
+        first_cycle_steps: 151
+        warmup_steps: 10
+        min_lr: 0.00001
+      critic_lr_scheduler:
+        first_cycle_steps: 151
+        warmup_steps: 10
+        min_lr: 0.0001
+    model:
+      ft_denoising_steps: 10
+      min_sampling_denoising_std: 0.05
+      min_logprob_denoising_std: 0.05
+      actor:
+        time_dim: 32
+        mlp_dims: [1024, 1024, 1024]
+        cond_mlp_dims: [512, 128]
+        residual_style: true
+      critic:
+        mlp_dims: [512, 512, 512]
+
+# Use terminate_on_success for eval so the score matches the benchmark-style
+# success criterion and does not penalize post-success instability.
+eval_bc:
+  config:
+    denoising_steps: 20
+    cond_steps: 8
+    horizon_steps: 4
+    act_steps: 4
+    n_episodes: 100
+    env:
+      n_envs: 50
+      wrappers:
+        robomimic_lowdim:
+          terminate_on_success: true
+    model:
+      network:
+        time_dim: 32
+        mlp_dims: [1024, 1024, 1024]
+        cond_mlp_dims: [512, 128]
+        residual_style: true
+
+eval_rl_init:
+  config:
+    denoising_steps: 20
+    ft_denoising_steps: 10
+    cond_steps: 8
+    horizon_steps: 4
+    act_steps: 4
+    n_episodes: 40
+    env:
+      n_envs: 50
+      wrappers:
+        robomimic_lowdim:
+          terminate_on_success: true
+    model:
+      ft_denoising_steps: 10
+      min_sampling_denoising_std: 0.05
+      min_logprob_denoising_std: 0.05
+      actor:
+        time_dim: 32
+        mlp_dims: [1024, 1024, 1024]
+        cond_mlp_dims: [512, 128]
+        residual_style: true
+      critic:
+        mlp_dims: [512, 512, 512]
+
+sweep:
+  eval_mode: bc
+  device: cpu
+  n_envs: 50
+  n_episodes: 40
+  n_steps: 500
+  max_episode_steps: 500
+  every_n: 1
+  video_checkpoints: none
+  render_num: 1
+  skip_existing: true
